@@ -1,0 +1,217 @@
+---
+title: "Large file uploads with chunked and multipart streaming"
+description: "Upload files of any size using the multipart helper or manual part control. Track progress, resume interrupted uploads, and read partial byte ranges."
+---
+
+Fula supports two complementary strategies for large file uploads. For unencrypted files, the `upload_large_file` helper splits data into S3 multipart parts and reassembles them server-side. For encrypted files, `put_object_chunked` splits the plaintext into independently encrypted IPFS blocks before upload, enabling verified partial reads without decrypting the entire file. Both approaches are memory-efficient — only one chunk is held in memory at a time.
+
+## When to use each approach
+
+| File size | Scenario | Recommended approach |
+|---|---|---|
+| Under 768 KB | Any | Single `put_object` or `put_object_flat` |
+| 768 KB – 5 GB | Unencrypted, public | `upload_large_file` (multipart) |
+| 768 KB – 5 GB | Encrypted, private | `put_object_chunked` via `EncryptedClient` |
+| Over 5 GB | Any | Multipart upload (no single-part size limit) |
+
+Use `EncryptedClient::should_use_chunked(len)` to let the SDK make the decision automatically for encrypted uploads.
+
+## The upload_large_file helper
+
+`upload_large_file` is the simplest way to upload a large unencrypted file. It calls `CreateMultipartUpload`, streams each chunk as a separate `UploadPart` request, and finalizes with `CompleteMultipartUpload`. An optional progress callback fires after each part.
+
+<Tabs>
+  <Tab title="With progress callback">
+    ```rust
+    use fula_client::multipart::upload_large_file;
+    use std::sync::Arc;
+
+    let etag = upload_large_file(
+        Arc::clone(&client),
+        "bucket",
+        "large-file.bin",
+        large_data,
+        Some(Box::new(|progress| {
+            println!("Progress: {:.1}%", progress.percentage());
+        })),
+    ).await?;
+    ```
+  </Tab>
+  <Tab title="Without progress callback">
+    ```rust
+    use fula_client::multipart::upload_large_file;
+    use std::sync::Arc;
+
+    let etag = upload_large_file(
+        Arc::clone(&client),
+        "bucket",
+        "large-file.bin",
+        large_data,
+        None,
+    ).await?;
+    ```
+  </Tab>
+</Tabs>
+
+The callback receives an `UploadProgress` value with the following fields:
+
+<AccordionGroup>
+  <Accordion title="UploadProgress fields">
+    <ParamField path="bytes_uploaded" type="u64">
+      Total bytes successfully uploaded so far across all completed parts.
+    </ParamField>
+    <ParamField path="total_bytes" type="u64">
+      Full size of the file being uploaded.
+    </ParamField>
+    <ParamField path="current_part" type="u32">
+      Part number just completed (1-indexed).
+    </ParamField>
+    <ParamField path="total_parts" type="u32">
+      Total number of parts the file was divided into.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+## Manual multipart upload
+
+When you need fine-grained control — uploading parts in parallel, resuming after a failure, or integrating with your own retry logic — use `MultipartUpload` directly.
+
+<Steps>
+  <Step title="Start the upload">
+    `MultipartUpload::start` calls `CreateMultipartUpload` and returns a handle containing the upload ID. Save this ID before uploading any parts so you can resume if interrupted.
+
+    ```rust
+    use fula_client::{FulaClient, Config, MultipartUpload};
+    use std::sync::Arc;
+
+    let client = Arc::new(FulaClient::new(
+        Config::new("https://s3.cloud.fx.land")
+            .with_token("your-jwt-token-here"),
+    )?);
+
+    let mut upload = MultipartUpload::start(
+        Arc::clone(&client),
+        "large-files",
+        "chunked-file.bin",
+    ).await?;
+
+    println!("Upload ID: {}", upload.upload_id());
+    ```
+  </Step>
+
+  <Step title="Upload parts">
+    Call `upload_part` for each chunk. Part numbers start at 1. Each part must be under 1 MB to remain compatible with IPFS block limits. A chunk size of 256 KB is a safe default.
+
+    ```rust
+    let chunk_size = 256 * 1024; // 256 KB chunks — IPFS compatible
+
+    for part_num in 1..=num_parts {
+        let chunk_data: Vec<u8> = data[((part_num - 1) * chunk_size)..(part_num * chunk_size)]
+            .to_vec();
+
+        upload.upload_part(part_num as u32, Bytes::from(chunk_data)).await?;
+        println!("Part {} uploaded", part_num);
+    }
+    ```
+
+    <Tip>
+      Save `upload.upload_id()` to durable storage before uploading the first part. If the process is interrupted, you can reconstruct the upload session and call `upload_part` for only the remaining parts.
+    </Tip>
+  </Step>
+
+  <Step title="Complete or abort">
+    After all parts are uploaded, call `complete` to assemble the final object. If you need to cancel, call `abort` to release the in-progress parts on the server.
+
+    ```rust
+    // On success
+    let etag = upload.complete().await?;
+    println!("Upload complete — ETag: {}", etag);
+
+    // Or on failure
+    // upload.abort().await?;
+    ```
+  </Step>
+</Steps>
+
+## Chunked encrypted upload
+
+`put_object_chunked` is the encrypted counterpart to multipart upload. It splits the plaintext into chunks, encrypts each chunk independently with AES-256-GCM, and uploads them as separate IPFS objects. A small index object holds the chunk manifest and the HPKE-wrapped DEK.
+
+```rust
+use fula_client::EncryptedClient;
+
+let large_data = std::fs::read("movie.mp4")?;
+
+if EncryptedClient::should_use_chunked(large_data.len()) {
+    client.put_object_chunked(
+        "my-bucket",
+        "/videos/movie.mp4",
+        &large_data,
+        Some(512 * 1024), // optional chunk size override
+    ).await?;
+}
+```
+
+The chunk size parameter is optional. When omitted, the SDK uses the default 256 KB chunk size defined in `fula-crypto`.
+
+### Partial reads with get_object_range
+
+Because each chunk is an independent IPFS block, you can fetch a specific byte range without downloading or decrypting the entire file. The SDK downloads only the chunks that overlap the requested range.
+
+<CodeGroup>
+
+```rust Encrypted (EncryptedClient)
+let partial = client.get_object_range(
+    "my-bucket",
+    "/videos/movie.mp4",
+    1024 * 1024,  // offset: 1 MB into the file
+    1024 * 1024,  // length: read 1 MB
+).await?;
+```
+
+```rust Unencrypted (FulaClient)
+// S3 Range header — fetches bytes 1MB to 2MB
+let result = client.get_object_range(
+    "my-bucket",
+    "video.mp4",
+    1024 * 1024,
+    1024 * 1024,
+).await?;
+```
+
+</CodeGroup>
+
+This is useful for media seeking, document previews, or resuming a download from a known offset.
+
+<Warning>
+  `get_object_range` only works on files uploaded with `put_object_chunked`. Calling it on a file uploaded as a single block will return the full file content regardless of the requested range.
+</Warning>
+
+## Size limits
+
+<CardGroup cols={2}>
+  <Card title="Single PUT" icon="arrow-up">
+    Maximum 5 GB per `put_object` or `put_object_flat` call. Files above this limit must use multipart or chunked upload.
+  </Card>
+  <Card title="Multipart total" icon="layer-group">
+    No practical upper limit. Each individual part must be under 1 MB for IPFS block compatibility.
+  </Card>
+</CardGroup>
+
+## Integrity and reliability
+
+<AccordionGroup>
+  <Accordion title="Bao hash tree verification">
+    Chunked encrypted files use a BLAKE3/Bao outboard hash tree. When downloading, the SDK verifies each chunk against the hash tree before returning data. This ensures bytes from untrusted IPFS nodes are not silently corrupted or substituted.
+  </Accordion>
+  <Accordion title="Memory efficiency">
+    Both multipart and chunked upload process one chunk at a time. Even for a 10 GB file, peak memory usage is bounded by the chunk size (256 KB by default), not the total file size.
+  </Accordion>
+  <Accordion title="Resumable uploads">
+    For multipart uploads, the upload ID returned by `upload_id()` is stable across process restarts. Store it alongside the list of already-uploaded part numbers and call `upload_part` only for the remaining parts. This avoids re-uploading data when a network failure interrupts a long upload.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  Chunk sizes must remain under 1 MB for compatibility with IPFS block limits. The defaults of 256 KB (crypto layer) and the configurable `multipart_chunk_size` in `Config` are both well within this limit.
+</Note>

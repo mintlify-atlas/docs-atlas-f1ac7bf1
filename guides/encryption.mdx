@@ -1,0 +1,290 @@
+---
+title: "Client-side encryption with HPKE and FlatNamespace"
+description: "Encrypt files before they leave your device using hybrid X25519 + ML-KEM-768 key encapsulation and AES-256-GCM. Keys never reach the server."
+---
+
+Fula's `EncryptedClient` encrypts every file on your device before it is sent to the gateway. The gateway and IPFS storage nodes receive only ciphertext — they never see your keys, file names, folder structure, or plaintext content. Encryption uses a hybrid key encapsulation mechanism that combines classical X25519 with post-quantum ML-KEM-768 (NIST FIPS 203), providing defense-in-depth against both classical and quantum adversaries.
+
+## How encryption works
+
+Each upload generates a fresh data encryption key (DEK). The DEK is used to encrypt the file content with AES-256-GCM. The DEK itself is then wrapped using HPKE with your master key pair (X25519 + ML-KEM-768) and stored alongside the ciphertext as object metadata. Because key wrapping happens client-side, only the holder of the corresponding secret key can unwrap the DEK and decrypt the file.
+
+<CardGroup cols={3}>
+  <Card title="Key encapsulation" icon="shield-halved">
+    Hybrid X25519 + ML-KEM-768 wraps the per-file DEK. Breaking one algorithm is not enough.
+  </Card>
+  <Card title="Symmetric encryption" icon="lock">
+    AES-256-GCM protects file content. The 256-bit key size is quantum-resistant.
+  </Card>
+  <Card title="Verified integrity" icon="circle-check">
+    BLAKE3 / Bao hash trees guarantee every byte came from a trusted source, even on untrusted nodes.
+  </Card>
+</CardGroup>
+
+### Quantum-safe hybrid KEM
+
+The `fula-crypto` crate implements a hybrid key encapsulation mechanism that combines both algorithms into a single 1120-byte encapsulated key:
+
+<CodeGroup>
+
+```rust Rust
+use fula_crypto::{HybridKeyPair, hybrid_encapsulate, hybrid_decapsulate};
+
+// Generate quantum-safe keypair (X25519 + ML-KEM-768)
+let keypair = HybridKeyPair::generate();
+
+// Sender encapsulates shared secret
+let (encapsulated_key, shared_secret) = hybrid_encapsulate(keypair.public_key())?;
+
+// Recipient decapsulates
+let recovered = hybrid_decapsulate(&encapsulated_key, keypair.secret_key())?;
+assert_eq!(shared_secret, recovered);
+```
+
+```text Wire format
+Hybrid Encapsulated Key (1120 bytes total)
+┌───────────────────────────────────────────────────────┐
+│  X25519 ephemeral public key        (32 bytes)        │
+│  ML-KEM-768 ciphertext              (1088 bytes)      │
+└───────────────────────────────────────────────────────┘
+
+Hybrid Public Key (1216 bytes total)
+┌───────────────────────────────────────────────────────┐
+│  X25519 public key                  (32 bytes)        │
+│  ML-KEM-768 public key              (1184 bytes)      │
+└───────────────────────────────────────────────────────┘
+```
+
+</CodeGroup>
+
+The two shared secrets are combined with HKDF-SHA256 using domain separation (`fula-hybrid-kem-v1`). If a future quantum computer breaks X25519 using Shor's algorithm, the ML-KEM-768 component still protects your data. If ML-KEM has an unforeseen weakness, X25519 still provides classical security.
+
+| Component | Algorithm | Security level |
+|---|---|---|
+| Key encapsulation | X25519 + ML-KEM-768 | Hybrid classical + post-quantum |
+| Symmetric encryption | AES-256-GCM | 256-bit, quantum-resistant |
+| Hashing | BLAKE3 | 256-bit, quantum-resistant |
+| Integrity | Bao (BLAKE3-based) | Verified streaming |
+
+## FlatNamespace mode
+
+FlatNamespace is the default obfuscation mode. In this mode the gateway sees storage keys that look like random IPFS CID hashes — for example, `QmX7a8f3e2d1c9b4a5`. The server cannot determine which objects are related, which are in the same folder, or what any file is named. The true directory structure is stored in an encrypted PrivateForest index that only your keys can decrypt.
+
+This contrasts with weaker modes where the server can infer structure from key prefixes:
+
+| Mode | What the server sees | Privacy level |
+|---|---|---|
+| `FlatNamespace` | `QmX7a8f3e2d1c9b4a5` | Highest — no hints |
+| `DeterministicHash` | `e/a7c3f9b2e8d14a6f` | Medium — `e/` prefix visible |
+| `RandomUuid` | `e/550e8400-e29b-41d4` | High — `e/` prefix visible |
+| `PreserveStructure` | `/photos/e_a7c3f9b2` | Low — folder path visible |
+
+<Tip>
+  Use `EncryptionConfig::new()` or `EncryptionConfig::new_flat_namespace()` — both default to FlatNamespace. Switch modes only if you have a specific reason such as server-side deduplication.
+</Tip>
+
+## EncryptionConfig options
+
+`EncryptionConfig` exposes builder methods to control key generation and obfuscation behavior. The defaults are appropriate for most applications.
+
+<Tabs>
+  <Tab title="New keys (default)">
+    Generates a fresh keypair with FlatNamespace enabled. Use this when setting up a new user.
+
+    ```rust
+    use fula_client::EncryptionConfig;
+
+    // FlatNamespace + new keypair
+    let encryption = EncryptionConfig::new();
+    ```
+
+    <ParamField path="metadata_privacy" type="bool" default="true">
+      Enables name and structure obfuscation. When `true`, storage keys are random CID-like hashes and the file tree is stored in an encrypted PrivateForest.
+    </ParamField>
+    <ParamField path="obfuscation_mode" type="KeyObfuscation" default="FlatNamespace">
+      Controls how storage keys are generated. `FlatNamespace` provides the strongest privacy — the server sees no structural information.
+    </ParamField>
+  </Tab>
+  <Tab title="Restored keys">
+    Reconstruct `EncryptionConfig` from a previously backed-up secret key to regain access to existing encrypted files.
+
+    ```rust
+    use fula_client::EncryptionConfig;
+    use fula_crypto::keys::SecretKey;
+
+    let secret = SecretKey::from_base64(&stored_secret_b64)?;
+    let encryption = EncryptionConfig::from_secret_key(secret);
+    ```
+  </Tab>
+  <Tab title="Without privacy">
+    Disables metadata obfuscation. File names and paths are stored as-is. Use only for non-sensitive data where you want the server to be able to index paths.
+
+    ```rust
+    use fula_client::EncryptionConfig;
+
+    let encryption = EncryptionConfig::new_without_privacy();
+    ```
+  </Tab>
+</Tabs>
+
+## What is encrypted vs. what remains visible
+
+Even with `EncryptedClient`, a small amount of information is unavoidably visible to the gateway.
+
+| Data | With `EncryptedClient` |
+|---|---|
+| File content | Encrypted |
+| File names | Encrypted (FlatNamespace mode) |
+| Directory structure | Encrypted (FlatNamespace mode) |
+| User IDs | Hashed |
+| Bucket names | **Visible** |
+| Approximate file sizes | **Visible** |
+| Request timestamps | **Visible** |
+
+## Uploading and downloading encrypted files
+
+The steps below walk through the complete lifecycle: generating keys, uploading with FlatNamespace, listing the encrypted forest, and downloading.
+
+<Steps>
+  <Step title="Create an EncryptionConfig">
+    `EncryptionConfig::new()` generates a fresh keypair and enables FlatNamespace by default. You can also restore from a previously exported secret key.
+
+    ```rust
+    use fula_client::{Config, EncryptedClient, EncryptionConfig};
+
+    // New keys — FlatNamespace enabled by default
+    let encryption = EncryptionConfig::new();
+
+    // Export for backup (handle with care)
+    let secret_b64 = encryption.export_secret_key().to_base64();
+    ```
+  </Step>
+
+  <Step title="Create an EncryptedClient">
+    Pass the config and the encryption configuration to `EncryptedClient::new`. The underlying `FulaClient` is wrapped automatically.
+
+    ```rust
+    let client = EncryptedClient::new(
+        Config::new("https://s3.cloud.fx.land")
+            .with_token("your-jwt-token-here"),
+        encryption,
+    )?;
+    ```
+  </Step>
+
+  <Step title="Upload with put_object_flat">
+    `put_object_flat` encrypts the file, generates an opaque storage key, adds the entry to the in-memory PrivateForest index, and saves the updated forest to storage.
+
+    ```rust
+    let data = std::fs::read("beach.jpg")?;
+
+    client.put_object_flat(
+        "bucket",
+        "/photos/vacation/beach.jpg",
+        data,
+        Some("image/jpeg"),
+    ).await?;
+    ```
+
+    For bulk uploads, use `put_object_flat_deferred` in a loop and call `flush_forest` once at the end — this is significantly more efficient because it avoids saving the forest index after every single file.
+  </Step>
+
+  <Step title="List files from the encrypted forest index">
+    `list_files_from_forest` reads the PrivateForest index without making additional per-file network requests. It returns the original decrypted paths and metadata.
+
+    ```rust
+    let files = client.list_files_from_forest("bucket").await?;
+
+    for file in &files {
+        println!("{} — {} bytes", file.original_key, file.original_size);
+    }
+    ```
+  </Step>
+
+  <Step title="Download and decrypt">
+    Pass the original logical path to `get_object_flat`. The client resolves it to the obfuscated storage key via the forest index, fetches the ciphertext, unwraps the DEK, and decrypts transparently.
+
+    ```rust
+    let plaintext = client.get_object_flat(
+        "bucket",
+        "/photos/vacation/beach.jpg",
+    ).await?;
+    ```
+  </Step>
+</Steps>
+
+## Restoring access from a backed-up key
+
+If you lose your client but kept a backup of the secret key, you can reconstruct the `EncryptionConfig` and regain access to all previously encrypted files.
+
+```rust
+use fula_client::{Config, EncryptedClient, EncryptionConfig};
+use fula_crypto::keys::SecretKey;
+
+let secret = SecretKey::from_base64(&stored_secret_b64)?;
+let encryption = EncryptionConfig::from_secret_key(secret);
+
+let client = EncryptedClient::new(
+    Config::new("https://s3.cloud.fx.land")
+        .with_token("your-jwt-token-here"),
+    encryption,
+)?;
+
+// All previously uploaded files are accessible again
+let decrypted = client.get_object_decrypted("bucket", "secrets/api-keys.json").await?;
+```
+
+## Encrypting large files
+
+For files above 768 KB, use `put_object_chunked`. The file is split into independent encrypted chunks that are each stored as a separate IPFS block. An index object holds the chunk manifest and the wrapped DEK.
+
+```rust
+use fula_client::EncryptedClient;
+
+let large_data = std::fs::read("movie.mp4")?;
+
+if EncryptedClient::should_use_chunked(large_data.len()) {
+    client.put_object_chunked(
+        "my-bucket",
+        "/videos/movie.mp4",
+        &large_data,
+        Some(512 * 1024), // 512 KB chunks (optional override)
+    ).await?;
+}
+```
+
+Chunked uploads also enable partial reads — you can download a specific byte range without fetching the whole file. See [Large file uploads](/guides/large-files) for details.
+
+<Note>
+  `EncryptedClient::should_use_chunked(len)` returns `true` when `len` exceeds the `CHUNKED_THRESHOLD` constant exported from `fula-crypto` (768 KB by default). Call this before deciding whether to use `put_object_flat` or `put_object_chunked`.
+</Note>
+
+<Warning>
+  There is no key escrow or recovery mechanism. If you lose your secret key and have no backup, all files encrypted with that key are permanently inaccessible. Back up your secret key to a secure location — a hardware security module, platform keychain, or encrypted offline storage — before uploading any important data.
+</Warning>
+
+## Key backup guidance
+
+<AccordionGroup>
+  <Accordion title="Export and store the secret key">
+    Call `export_secret_key()` immediately after creating an `EncryptionConfig` and before any uploads. The returned `SecretKey` serializes to a base64 string with `to_base64()`.
+
+    ```rust
+    let encryption = EncryptionConfig::new();
+    let secret_b64 = encryption.export_secret_key().to_base64();
+    // Write secret_b64 to a hardware key manager, platform keychain, or
+    // encrypted backup before proceeding
+    ```
+  </Accordion>
+  <Accordion title="Restore from a backup">
+    Pass the base64 secret to `SecretKey::from_base64`, then construct `EncryptionConfig::from_secret_key`. The deterministic key derivation ensures that path-to-storage-key mappings and the forest index key are computed identically.
+
+    ```rust
+    let secret = SecretKey::from_base64(&stored_secret_b64)?;
+    let encryption = EncryptionConfig::from_secret_key(secret);
+    ```
+  </Accordion>
+  <Accordion title="Using EncryptedClient vs. raw FulaClient">
+    `FulaClient` (and raw S3 tools such as the AWS CLI or boto3) upload plaintext. Any gateway operator or IPFS node operator can read the content. Use `EncryptedClient` whenever the data is sensitive. If you only need to serve public files — static assets, public downloads — `FulaClient` is simpler and avoids encryption overhead.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,150 @@
+---
+title: "Authenticate with Fula Storage API"
+description: "Fula uses JWT Bearer tokens validated by the gateway. Embed your token in any S3 client using the JWT: access key prefix — no SDK changes required."
+---
+
+Fula Storage authenticates every request using a JWT (JSON Web Token). The gateway validates the token on each request and rejects calls with missing, malformed, or expired tokens. You never need to manage AWS IAM users or static access keys — your JWT is the only credential required.
+
+## Authentication methods
+
+There are two ways to pass your JWT token to the gateway. Both are fully supported and extract the same token on the server side.
+
+### Bearer token
+
+Use the `Authorization` header directly when making HTTP requests or using an HTTP client that is not AWS SDK-based:
+
+<ParamField header="Authorization" type="string" required>
+  `Bearer <jwt-token>` — Your JWT token prefixed with the literal string `Bearer `.
+</ParamField>
+
+```bash
+curl -X GET https://s3.cloud.fx.land/ \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### AWS Signature V4 with embedded JWT
+
+Standard S3 clients (AWS CLI, boto3, AWS SDK) sign requests using AWS Signature V4. Fula intercepts the `Credential` field in the `Authorization` header and extracts your JWT from the access key. Set `aws_access_key_id` to `JWT:<your-token>` and set `aws_secret_access_key` to any non-empty string — it is not verified.
+
+The gateway parses the Authorization header in this format:
+
+```
+AWS4-HMAC-SHA256 Credential=JWT:<jwt-token>/20231207/us-east-1/s3/aws4_request,
+SignedHeaders=host;x-amz-date, Signature=<sig>
+```
+
+Your S3 client constructs this header automatically when you set `aws_access_key_id = JWT:<your-token>`.
+
+<Note>
+  The `aws_secret_access_key` value is never read or validated by the gateway. The string `not-used` is conventional but any value works.
+</Note>
+
+## Getting a JWT token
+
+Obtain a token from the Functionland auth service using an OAuth 2.0 authorization code flow:
+
+1. Direct your user (or your server) to `https://auth.fx.land/authorize` with the required scopes.
+2. After the user authenticates, the auth service returns a JWT access token.
+3. Pass this token to your S3 client as described above.
+
+### Available scopes
+
+| Scope | Permission |
+|---|---|
+| `storage:read` | Read objects and list buckets |
+| `storage:write` | Create buckets, upload, delete objects |
+| `storage:*` | Full storage access |
+
+## Client setup examples
+
+<CodeGroup>
+
+```ini AWS CLI (~/.aws/credentials)
+[fula]
+aws_access_key_id = JWT:your-jwt-token-here
+aws_secret_access_key = not-used
+```
+
+```bash AWS CLI usage
+aws s3 ls s3://my-bucket/ \
+  --endpoint-url https://s3.cloud.fx.land \
+  --profile fula
+```
+
+</CodeGroup>
+
+<CodeGroup>
+
+```python Python (boto3)
+import boto3
+
+jwt_token = "your-jwt-token-here"
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url="https://s3.cloud.fx.land",
+    aws_access_key_id=f"JWT:{jwt_token}",
+    aws_secret_access_key="not-used",
+    region_name="us-east-1",
+)
+```
+
+```javascript JavaScript (AWS SDK)
+import { S3Client } from "@aws-sdk/client-s3";
+
+const jwtToken = "your-jwt-token-here";
+
+const s3 = new S3Client({
+  endpoint: "https://s3.cloud.fx.land",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: `JWT:${jwtToken}`,
+    secretAccessKey: "not-used",
+  },
+});
+```
+
+```rust Rust (fula-client)
+use fula_client::{FulaClient, Config};
+
+let client = FulaClient::new(
+    Config::new("https://s3.cloud.fx.land")
+        .with_token("your-jwt-token-here"),
+)?;
+```
+
+</CodeGroup>
+
+## JWT token structure
+
+The gateway reads the following standard claims from your token:
+
+| Claim | Type | Description |
+|---|---|---|
+| `sub` | string | User ID (required) |
+| `exp` | integer | Expiration time (Unix timestamp, optional) |
+| `iat` | integer | Issued-at time (Unix timestamp, optional) |
+| `scope` | string | Space-separated list of granted scopes |
+| `name` | string | Display name (optional) |
+
+<Tip>
+  Tokens without an `exp` claim are accepted. If your token provider issues non-expiring tokens, they will continue to work. For production use, prefer tokens with a short expiry and implement a refresh flow.
+</Tip>
+
+## Error codes
+
+| HTTP status | S3 error code | Cause |
+|---|---|---|
+| 401 | `InvalidToken` | `Authorization` header is missing, malformed, or the token signature is invalid |
+| 401 | `InvalidToken` | AWS Sig V4 access key does not start with `JWT:` |
+| 401 | `InvalidToken` | `x-amz-date` header is missing or outside the 15-minute replay-protection window |
+| 403 | `AccessDenied` | Token is valid but the `scope` claim does not include the required permission |
+
+## Authentication and encryption
+
+<Warning>
+  Authentication proves who you are — it does not encrypt your data. Raw S3 tools (AWS CLI, boto3, AWS SDK) upload plaintext that gateway operators can read. For private files, use the [Encrypted Client SDK](/guides/encryption) to encrypt data client-side before it reaches the gateway.
+</Warning>
+
+With the `EncryptedClient`, your encryption keys are generated locally and never sent to the server. The gateway only ever receives ciphertext.

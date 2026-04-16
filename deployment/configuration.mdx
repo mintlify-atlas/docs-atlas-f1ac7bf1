@@ -1,0 +1,130 @@
+---
+title: 'Configure the Fula Storage gateway'
+description: 'Reference for all environment variables that control the Fula gateway: port, IPFS endpoint, JWT secret, rate limits, storage limits, and pinning service.'
+---
+
+All Fula gateway configuration is done through environment variables. Copy `.env.example` to `.env` in your deployment directory and edit the values before starting the gateway. When running with Docker Compose, the `env_file: .env` directive in `docker-compose.yml` loads the file automatically.
+
+```bash
+cp .env.example .env
+```
+
+The sections below document every supported variable, its type, default value, and effect on gateway behavior.
+
+---
+
+## Gateway settings
+
+Controls how the gateway binds to the network and what it logs.
+
+<ParamField path="FULA_HOST" type="string" default="0.0.0.0">
+  Host address the gateway binds to. Use `0.0.0.0` to accept connections on all interfaces, or a specific IP to restrict access.
+</ParamField>
+
+<ParamField path="FULA_PORT" type="number" default="9000">
+  TCP port the gateway listens on. All S3 API requests are served from this port.
+</ParamField>
+
+<ParamField path="FULA_DEBUG" type="boolean" default="false">
+  Enables verbose debug logging. Avoid in production — it produces significant log volume.
+</ParamField>
+
+<ParamField path="FULA_NO_AUTH" type="boolean" default="false">
+  Disables JWT authentication entirely when set to `true`. **For local development only.** Never enable this in a production or internet-facing deployment.
+</ParamField>
+
+---
+
+## Authentication
+
+<ParamField path="JWT_SECRET" type="string" default="your-secret-key-here-change-in-production">
+  The secret used to validate incoming JWT tokens. Replace the placeholder with a strong random value before any deployment. Generate one with:
+
+  ```bash
+  openssl rand -base64 32
+  ```
+
+  All S3 clients must embed a valid JWT in the `aws_access_key_id` field using the `JWT:<token>` prefix.
+</ParamField>
+
+---
+
+## IPFS settings
+
+<ParamField path="IPFS_API_URL" type="string" default="http://localhost:5001">
+  URL of the IPFS HTTP API used for block-level operations. Must be reachable from the gateway process. When using Docker Compose with `network_mode: host`, `localhost` refers to the host machine.
+</ParamField>
+
+<ParamField path="CLUSTER_API_URL" type="string" default="http://localhost:9094">
+  URL of the IPFS Cluster API. This setting is considered legacy — prefer `PINNING_SERVICE_ENDPOINT` for new deployments.
+</ParamField>
+
+<ParamField path="FULA_MEMORY_STORE" type="boolean" default="false">
+  When `true`, the gateway uses in-memory storage instead of persisting blocks to IPFS. **Data is lost when the process stops.** Use only for integration testing.
+</ParamField>
+
+---
+
+## Pinning service
+
+The gateway forwards the user's JWT to the remote pinning service automatically. No separate token configuration is required — set only the endpoint URL.
+
+<ParamField path="PINNING_SERVICE_ENDPOINT" type="string">
+  URL of a remote IPFS pinning service that implements the [IPFS Pinning Service API](https://ipfs.github.io/pinning-services-api-spec/). Supported services:
+
+  | Service | Endpoint |
+  |---|---|
+  | Pinata | `https://api.pinata.cloud/psa` |
+  | Web3.Storage | `https://api.web3.storage` |
+  | NFT.Storage | `https://nft.storage/api` |
+  | Infura | `https://ipfs.infura.io:5001` |
+
+  Leave unset to skip remote pinning and rely solely on the local IPFS node.
+</ParamField>
+
+Users can override the pinning service on a per-request basis by passing `X-Pinning-Service` and `X-Pinning-Token` headers.
+
+---
+
+## Storage limits
+
+<ParamField path="MAX_UPLOAD_SIZE" type="number" default="5368709120">
+  Maximum allowed size in bytes for a single upload request. Default is 5 GB (`5368709120`). Requests exceeding this limit are rejected before any data is stored.
+</ParamField>
+
+<ParamField path="MULTIPART_CHUNK_SIZE" type="number" default="8388608">
+  Target chunk size in bytes for multipart uploads. Default is 8 MB (`8388608`).
+</ParamField>
+
+<ParamField path="MULTIPART_EXPIRY_SECS" type="number" default="86400">
+  Time in seconds before an incomplete multipart upload is automatically abandoned. Default is 24 hours (`86400`).
+</ParamField>
+
+---
+
+## Rate limiting
+
+<ParamField path="RATE_LIMIT_RPS" type="number" default="100">
+  Maximum number of requests per second allowed per authenticated user. Requests that exceed this threshold receive a `429 Too Many Requests` response.
+</ParamField>
+
+---
+
+## Logging
+
+<ParamField path="RUST_LOG" type="string" default="info,fula_cli=debug,tower_http=debug">
+  Log level filter in the standard [`env_logger`](https://docs.rs/env_logger) format. Accepts comma-separated `target=level` pairs. Valid levels: `error`, `warn`, `info`, `debug`, `trace`.
+
+  Examples:
+
+  ```bash
+  # Quiet — warnings and errors only
+  RUST_LOG=warn
+
+  # Verbose — full debug output for all crates
+  RUST_LOG=debug
+
+  # Default — info globally, debug for fula and HTTP layers
+  RUST_LOG=info,fula_cli=debug,tower_http=debug
+  ```
+</ParamField>

@@ -1,0 +1,381 @@
+---
+title: "Platform SDKs for Rust, Flutter, Python, and JavaScript"
+description: "Install and configure the Fula client SDK on Rust, Flutter (Android, iOS, Web), Python with boto3, and JavaScript with the AWS SDK v3."
+---
+
+Fula provides a native Rust client SDK with full encryption support, a Flutter package for Android, iOS, and Web, and S3-compatible integration for Python and JavaScript using standard AWS libraries. All four options connect to the same gateway endpoint and support the same bucket and object operations. The Rust and Flutter SDKs additionally support client-side encryption, FlatNamespace metadata hiding, secure file sharing, and key rotation.
+
+<CardGroup cols={2}>
+  <Card title="Rust SDK" icon="rust" href="/sdk/rust">
+    Full-featured native client. Supports encryption, FlatNamespace, chunked uploads, and key rotation.
+  </Card>
+  <Card title="Flutter SDK" icon="mobile" href="/sdk/flutter">
+    Android, iOS, and Web (WASM). Generated with `flutter_rust_bridge` from the same Rust core.
+  </Card>
+  <Card title="Python" icon="python" href="/sdk/python">
+    Use the standard `boto3` library. Point it at the Fula endpoint and supply your JWT token.
+  </Card>
+  <Card title="JavaScript" icon="js" href="/sdk/javascript">
+    Use `@aws-sdk/client-s3`. Set `forcePathStyle: true` and supply your JWT token as the access key.
+  </Card>
+</CardGroup>
+
+## Rust SDK
+
+The `fula-client` crate is the primary SDK. It provides `FulaClient` for plain S3 operations and `EncryptedClient` for client-side encryption with FlatNamespace, chunked uploads, and key rotation.
+
+<Steps>
+  <Step title="Add the dependency">
+    Add `fula-client` to your `Cargo.toml`. The crate is available directly from the Git repository.
+
+    <CodeGroup>
+
+    ```toml Cargo.toml (Git)
+    [dependencies]
+    fula-client = { git = "https://github.com/functionland/fula-api" }
+    tokio = { version = "1", features = ["full"] }
+    anyhow = "1"
+    ```
+
+    ```toml Cargo.toml (with fula-crypto)
+    [dependencies]
+    fula-client = { git = "https://github.com/functionland/fula-api" }
+    fula-crypto = { git = "https://github.com/functionland/fula-api" }
+    tokio = { version = "1", features = ["full"] }
+    anyhow = "1"
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Create a basic client">
+    ```rust
+    use fula_client::{FulaClient, Config};
+
+    #[tokio::main]
+    async fn main() -> anyhow::Result<()> {
+        let client = FulaClient::new(Config::new("https://s3.cloud.fx.land"))?;
+
+        client.create_bucket("my-bucket").await?;
+        client.put_object("my-bucket", "hello.txt", b"Hello, World!").await?;
+
+        let data = client.get_object("my-bucket", "hello.txt").await?;
+        println!("{}", String::from_utf8_lossy(&data));
+
+        Ok(())
+    }
+    ```
+  </Step>
+
+  <Step title="Enable client-side encryption">
+    Create an `EncryptionConfig` and pass it to `EncryptedClient`. FlatNamespace is enabled by default.
+
+    ```rust
+    use fula_client::{Config, EncryptedClient, EncryptionConfig};
+
+    let encryption = EncryptionConfig::new();
+    let client = EncryptedClient::new(
+        Config::new("https://s3.cloud.fx.land")
+            .with_token("your-jwt-token-here"),
+        encryption,
+    )?;
+
+    client.put_object_flat("bucket", "/photos/vacation/beach.jpg", data, None).await?;
+    let files = client.list_files_from_forest("bucket").await?;
+    ```
+  </Step>
+</Steps>
+
+## Flutter SDK
+
+The `fula_client` Flutter package is generated from the Rust SDK using `flutter_rust_bridge`. It targets Android (arm64-v8a, armeabi-v7a, x86_64 via FFI), iOS (via FFI), and Flutter Web (via WASM). All platforms share the same encryption code.
+
+<Tabs>
+  <Tab title="Installation">
+    Add the package to your `pubspec.yaml` or install via the CLI:
+
+    ```bash
+    flutter pub add fula_client
+    ```
+
+    ```yaml pubspec.yaml
+    dependencies:
+      fula_client: ^0.2.26
+    ```
+
+    For Android, add ABI filters to `android/app/build.gradle`:
+
+    ```gradle android/app/build.gradle
+    android {
+        defaultConfig {
+            ndk {
+                abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+            }
+        }
+    }
+    ```
+
+    For Flutter Web (WASM), configure your web server to serve `.wasm` files with the MIME type `application/wasm`.
+  </Tab>
+  <Tab title="Basic usage">
+    ```dart
+    import 'package:fula_client/fula_client.dart';
+    import 'dart:convert';
+    import 'dart:typed_data';
+
+    Future<void> main() async {
+      final config = FulaConfig(
+        endpoint: 'https://s3.cloud.fx.land',
+        accessToken: 'your-jwt-token',
+      );
+
+      final client = await createClient(config);
+
+      // Create bucket and upload
+      await createBucket(client, 'my-bucket');
+      final data = utf8.encode('Hello, Fula!');
+      await putObject(client, 'my-bucket', 'hello.txt', Uint8List.fromList(data));
+
+      // Download
+      final downloaded = await getObject(client, 'my-bucket', 'hello.txt');
+      print('Content: ${utf8.decode(downloaded)}');
+    }
+    ```
+  </Tab>
+  <Tab title="Encrypted client">
+    Use FlatNamespace mode for maximum privacy. File names and directory structure are hidden from the server.
+
+    ```dart
+    import 'package:fula_client/fula_client.dart';
+    import 'dart:convert';
+    import 'dart:typed_data';
+
+    Future<void> main() async {
+      final config = FulaConfig(
+        endpoint: 'https://s3.cloud.fx.land',
+        accessToken: 'your-jwt-token',
+      );
+
+      // FlatNamespace is RECOMMENDED for maximum privacy
+      final encConfig = EncryptionConfig(
+        enableMetadataPrivacy: true,
+        obfuscationMode: ObfuscationMode.flatNamespace,
+      );
+
+      final client = await createEncryptedClient(config, encConfig);
+
+      // Upload encrypted file using path-based API
+      final data = utf8.encode('Secret document content');
+      await putFlat(
+        client,
+        'my-bucket',
+        '/documents/secret.txt',
+        Uint8List.fromList(data),
+        'text/plain',
+      );
+
+      // Download and decrypt
+      final decrypted = await getFlat(client, 'my-bucket', '/documents/secret.txt');
+      print('Content: ${utf8.decode(decrypted)}');
+
+      // List files — returns original names, not obfuscated keys
+      final files = await listDecrypted(client, 'my-bucket', ListOptions());
+      for (final file in files) {
+        print('${file.originalKey} — ${file.size} bytes');
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Key export and restore">
+    Export the secret key before any uploads and store it securely. You can restore access to all encrypted files by passing the key back to `EncryptionConfig`.
+
+    ```dart
+    // Export — call immediately after creating the encrypted client
+    final secretKey = exportSecretKey(encryptedClient);
+    // Store secretKey in the platform keychain or an encrypted backup
+
+    // Restore on a new device or after reinstall
+    final restoredClient = await createEncryptedClient(
+      config,
+      EncryptionConfig(
+        secretKey: secretKey,
+        enableMetadataPrivacy: true,
+      ),
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## Python
+
+Python applications use the standard `boto3` library. No Fula-specific package is required. Point `endpoint_url` at the Fula gateway and embed your JWT token in `aws_access_key_id`.
+
+<Steps>
+  <Step title="Install boto3">
+    ```bash
+    pip install boto3
+    ```
+  </Step>
+
+  <Step title="Configure the client">
+    ```python
+    import boto3
+
+    jwt_token = "your-jwt-token-here"
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url="https://s3.cloud.fx.land",
+        aws_access_key_id=f"JWT:{jwt_token}",
+        aws_secret_access_key="not-used",
+        region_name="us-east-1",
+    )
+    ```
+  </Step>
+
+  <Step title="Use the S3 API normally">
+    ```python
+    # Create bucket
+    s3.create_bucket(Bucket="my-bucket")
+
+    # Upload
+    s3.put_object(Bucket="my-bucket", Key="hello.txt", Body=b"Hello World!")
+
+    # Download
+    response = s3.get_object(Bucket="my-bucket", Key="hello.txt")
+    print(response["Body"].read().decode())
+
+    # List objects
+    response = s3.list_objects_v2(Bucket="my-bucket")
+    for obj in response.get("Contents", []):
+        print(obj["Key"], obj["Size"])
+    ```
+  </Step>
+</Steps>
+
+## JavaScript
+
+JavaScript and TypeScript applications use the standard `@aws-sdk/client-s3` package. Set `forcePathStyle: true` — this is required for the Fula gateway's path-based URL format.
+
+<Steps>
+  <Step title="Install the AWS SDK">
+    ```bash
+    npm install @aws-sdk/client-s3
+    ```
+  </Step>
+
+  <Step title="Configure the client">
+    ```javascript
+    import { S3Client } from "@aws-sdk/client-s3";
+
+    const jwtToken = "your-jwt-token-here";
+
+    const s3 = new S3Client({
+      endpoint: "https://s3.cloud.fx.land",
+      region: "us-east-1",
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: `JWT:${jwtToken}`,
+        secretAccessKey: "not-used",
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Use the S3 API normally">
+    ```javascript
+    import {
+      CreateBucketCommand,
+      PutObjectCommand,
+      GetObjectCommand,
+      ListObjectsV2Command,
+    } from "@aws-sdk/client-s3";
+
+    // Create bucket
+    await s3.send(new CreateBucketCommand({ Bucket: "my-bucket" }));
+
+    // Upload
+    await s3.send(new PutObjectCommand({
+      Bucket: "my-bucket",
+      Key: "hello.txt",
+      Body: "Hello World!",
+    }));
+
+    // Download
+    const response = await s3.send(
+      new GetObjectCommand({ Bucket: "my-bucket", Key: "hello.txt" })
+    );
+    const text = await response.Body.transformToString();
+    console.log(text);
+
+    // List objects
+    const list = await s3.send(new ListObjectsV2Command({ Bucket: "my-bucket" }));
+    for (const obj of list.Contents ?? []) {
+      console.log(obj.Key, obj.Size);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Flutter configuration reference
+
+The `FulaConfig` and `EncryptionConfig` classes control connection and encryption behavior.
+
+<AccordionGroup>
+  <Accordion title="FulaConfig fields">
+    <ParamField path="endpoint" type="String" required>
+      Gateway URL. Use `https://s3.cloud.fx.land` for production or `http://localhost:9000` for local development.
+    </ParamField>
+    <ParamField path="accessToken" type="String?">
+      JWT authentication token. Required for production. Optional when the gateway runs with `--no-auth`.
+    </ParamField>
+    <ParamField path="timeoutSeconds" type="int" default="30">
+      Request timeout in seconds. Increase for large file uploads on slow connections.
+    </ParamField>
+    <ParamField path="maxRetries" type="int" default="3">
+      Number of automatic retries on network failure before returning an error.
+    </ParamField>
+  </Accordion>
+  <Accordion title="EncryptionConfig fields">
+    <ParamField path="secretKey" type="Uint8List?">
+      32-byte secret key for restoring an existing encrypted session. Pass `null` to generate a new keypair automatically.
+    </ParamField>
+    <ParamField path="enableMetadataPrivacy" type="bool" default="true">
+      Obfuscates file names and directory structure. When `true`, the server cannot infer any path information from storage keys.
+    </ParamField>
+    <ParamField path="obfuscationMode" type="ObfuscationMode" default="ObfuscationMode.flatNamespace">
+      Controls the storage key format. `flatNamespace` provides maximum privacy; `deterministic` allows server-side deduplication of identical files.
+    </ParamField>
+  </Accordion>
+  <Accordion title="Platform-specific notes">
+
+    **Android**: The native library requires Android SDK 21+. ABI filters must include at least one of `arm64-v8a`, `armeabi-v7a`, or `x86_64` in `build.gradle`.
+
+    **iOS**: The library is compiled as a static framework via FFI. Minimum deployment target is iOS 13.
+
+    **Flutter Web (WASM)**: Requires Chrome 57+, Firefox 52+, or Safari 11+. The WASM runtime uses the browser's async scheduler instead of Tokio — no changes to your Dart code are needed.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+  If you are building a mobile or web app that needs encryption, use the Flutter SDK. It uses the same Rust crypto core as the native Rust SDK, so you get identical security guarantees on Android, iOS, and the browser.
+</Tip>
+
+<Warning>
+  Python (`boto3`) and JavaScript (`@aws-sdk/client-s3`) clients do not support Fula's client-side HPKE encryption. Data uploaded through these libraries is stored as plaintext on IPFS nodes. Use the Rust or Flutter SDK if your application handles sensitive data that must be encrypted before leaving the device.
+</Warning>
+
+## Platform support matrix
+
+| Platform | SDK | Encryption | FlatNamespace | Multipart |
+|---|---|---|---|---|
+| Linux / macOS / Windows | Rust `fula-client` | Yes | Yes | Yes |
+| Android | Flutter `fula_client` | Yes | Yes | Yes |
+| iOS | Flutter `fula_client` | Yes | Yes | Yes |
+| Flutter Web | Flutter `fula_client` (WASM) | Yes | Yes | Yes |
+| Python | boto3 (S3-compatible) | No | No | Yes |
+| JavaScript / Node.js | @aws-sdk/client-s3 | No | No | Yes |
+
+<Note>
+  Python and JavaScript clients use standard AWS library encryption (server-side) when enabled, not Fula's client-side HPKE encryption. For end-to-end client-side encryption, use the Rust or Flutter SDK. See [Client-side encryption](/guides/encryption) for details.
+</Note>

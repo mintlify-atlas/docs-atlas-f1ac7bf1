@@ -1,0 +1,239 @@
+---
+title: 'Python SDK: use Fula Storage with boto3'
+description: 'Connect to Fula Storage from Python using boto3. Configure the S3 endpoint, pass a JWT token as the access key, and use standard S3 operations.'
+---
+
+Fula Storage speaks the S3 protocol, so the standard `boto3` library works out of the box. You authenticate by embedding your JWT token in the access key with a `JWT:` prefix — the secret key is ignored by the gateway.
+
+<Warning>
+  `boto3` sends data as plaintext to the Fula gateway. The gateway operator can read every byte you upload. For private data, use the [Rust Encrypted Client SDK](/sdk/rust) instead, which encrypts data on the client before it ever leaves your machine.
+</Warning>
+
+## Installation
+
+```bash
+pip install boto3
+```
+
+`botocore` is installed automatically as a dependency of `boto3`.
+
+## Client configuration
+
+<Steps>
+  <Step title="Obtain a JWT token">
+    Log in to your Fula account or use the gateway's authentication endpoint to retrieve a JWT bearer token. Keep it secret.
+  </Step>
+  <Step title="Configure the S3 client">
+    Pass the token as `aws_access_key_id` with a `JWT:` prefix. The `aws_secret_access_key` value is sent but not verified — any non-empty string works.
+
+    ```python
+    import boto3
+
+    jwt_token = "your-jwt-token-here"
+
+    s3 = boto3.client(
+        's3',
+        endpoint_url='https://s3.cloud.fx.land',
+        aws_access_key_id=f'JWT:{jwt_token}',
+        aws_secret_access_key='not-used',
+        region_name='us-east-1',
+    )
+    ```
+  </Step>
+</Steps>
+
+### Environment variable approach
+
+Avoid hard-coding tokens in source files. Export them as environment variables and let `boto3` pick them up:
+
+```bash
+export AWS_ACCESS_KEY_ID="JWT:your-jwt-token-here"
+export AWS_SECRET_ACCESS_KEY="not-used"
+export AWS_ENDPOINT_URL="https://s3.cloud.fx.land"
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+```python
+import boto3
+
+# No credentials needed in code — read from environment
+s3 = boto3.client('s3')
+```
+
+<Tip>
+  Use a `.env` file with `python-dotenv` in development, and inject environment variables via your CI/CD secrets manager in production. Never commit tokens to source control.
+</Tip>
+
+---
+
+## Basic operations
+
+### Create a bucket
+
+```python
+s3.create_bucket(Bucket='my-bucket')
+```
+
+### Upload an object
+
+```python
+s3.put_object(Bucket='my-bucket', Key='hello.txt', Body=b'Hello World!')
+```
+
+### Download an object
+
+```python
+response = s3.get_object(Bucket='my-bucket', Key='hello.txt')
+data = response['Body'].read()
+print(data.decode('utf-8'))
+```
+
+### Delete an object
+
+```python
+s3.delete_object(Bucket='my-bucket', Key='hello.txt')
+```
+
+### List objects
+
+```python
+response = s3.list_objects_v2(Bucket='my-bucket', Prefix='data/')
+
+for obj in response.get('Contents', []):
+    print(f"{obj['Key']}  ({obj['Size']} bytes)")
+```
+
+Paginate through large buckets using the continuation token:
+
+```python
+paginator = s3.get_paginator('list_objects_v2')
+pages = paginator.paginate(Bucket='my-bucket', Prefix='data/')
+
+for page in pages:
+    for obj in page.get('Contents', []):
+        print(obj['Key'])
+```
+
+---
+
+## Large file uploads
+
+For files larger than a few hundred megabytes, use `upload_file` which drives boto3's built-in multipart transfer manager. It automatically splits the file, uploads parts in parallel, and retries failed parts.
+
+```python
+from boto3.s3.transfer import TransferConfig
+
+config = TransferConfig(
+    multipart_threshold=100 * 1024 * 1024,   # 100 MB
+    max_concurrency=4,
+    multipart_chunksize=16 * 1024 * 1024,    # 16 MB per part
+)
+
+s3.upload_file(
+    Filename='/path/to/large-file.zip',
+    Bucket='my-bucket',
+    Key='archives/large-file.zip',
+    Config=config,
+)
+```
+
+Track progress with a callback:
+
+```python
+import os
+
+file_size = os.path.getsize('/path/to/large-file.zip')
+uploaded = 0
+
+def progress(bytes_transferred):
+    global uploaded
+    uploaded += bytes_transferred
+    pct = uploaded / file_size * 100
+    print(f'\rUploading: {pct:.1f}%', end='', flush=True)
+
+s3.upload_file(
+    Filename='/path/to/large-file.zip',
+    Bucket='my-bucket',
+    Key='archives/large-file.zip',
+    Callback=progress,
+)
+print()  # newline after progress
+```
+
+---
+
+## Error handling
+
+Import `botocore.exceptions` to catch S3-level errors:
+
+```python
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError, EndpointResolutionError
+
+try:
+    response = s3.get_object(Bucket='my-bucket', Key='missing.txt')
+    data = response['Body'].read()
+
+except ClientError as e:
+    code = e.response['Error']['Code']
+    if code == 'NoSuchKey':
+        print('Object not found.')
+    elif code == 'NoSuchBucket':
+        print('Bucket does not exist.')
+    elif code == 'AccessDenied':
+        print('Access denied — check your JWT token.')
+    else:
+        print(f'S3 error {code}: {e.response["Error"]["Message"]}')
+
+except NoCredentialsError:
+    print('No credentials found. Set AWS_ACCESS_KEY_ID.')
+
+except EndpointResolutionError:
+    print('Could not reach the gateway. Check endpoint_url.')
+```
+
+---
+
+## Complete example
+
+```python
+import boto3
+from botocore.exceptions import ClientError
+
+jwt_token = "your-jwt-token-here"
+
+s3 = boto3.client(
+    's3',
+    endpoint_url='https://s3.cloud.fx.land',
+    aws_access_key_id=f'JWT:{jwt_token}',
+    aws_secret_access_key='not-used',
+    region_name='us-east-1',
+)
+
+# Create bucket
+s3.create_bucket(Bucket='my-bucket')
+
+# Upload
+s3.put_object(Bucket='my-bucket', Key='hello.txt', Body=b'Hello World!')
+
+# Download
+response = s3.get_object(Bucket='my-bucket', Key='hello.txt')
+data = response['Body'].read()
+print(f'Content: {data.decode()}')
+
+# List
+result = s3.list_objects_v2(Bucket='my-bucket')
+for obj in result.get('Contents', []):
+    print(f"  {obj['Key']}  ({obj['Size']} bytes)")
+
+# Delete
+s3.delete_object(Bucket='my-bucket', Key='hello.txt')
+```
+
+---
+
+## Presigned URLs
+
+<Note>
+  Presigned URLs are not supported by the Fula gateway. Use standard authenticated S3 operations (as shown above) to access objects. Third-party S3-compatible presigned URL flows will not work.
+</Note>

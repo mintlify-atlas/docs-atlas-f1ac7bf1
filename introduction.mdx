@@ -1,0 +1,111 @@
+---
+title: "Fula Storage API: Decentralized S3-Compatible Storage"
+description: "Fula Storage is an S3-compatible API backed by IPFS with client-side quantum-safe encryption, CRDT metadata sync, and Prolly Tree indexing."
+---
+
+Fula Storage provides an Amazon S3-compatible API backed by a decentralized network of IPFS nodes. You can use any S3 tool you already know — AWS CLI, boto3, or the AWS SDK — while your data is protected by client-side encryption and stored across a resilient distributed network. Storage nodes never see your plaintext data; encryption and decryption happen entirely on your device.
+
+## Architecture
+
+The Fula stack is composed of four layers: an S3-compatible gateway, a storage engine, a block store, and a cryptography layer. Each layer is independently replaceable and auditable.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                         │
+│         (boto3, AWS SDK, curl, any S3 client)               │
+├─────────────────────────────────────────────────────────────┤
+│                     Fula Gateway                             │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │    Auth     │ Rate Limiter │   S3 API Handlers    │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+├─────────────────────────────────────────────────────────────┤
+│                      fula-core                               │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │Prolly Trees │    Buckets   │       CRDTs          │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+├─────────────────────────────────────────────────────────────┤
+│                   fula-blockstore                            │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │    IPFS     │ IPFS Cluster │      Chunking        │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+├─────────────────────────────────────────────────────────────┤
+│                    fula-crypto (Quantum-Safe)                │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │ Hybrid KEM  │   BLAKE3     │        Bao           │    │
+│    │ X25519+MLKEM│              │                      │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="S3 compatibility" icon="cloud">
+    Drop-in replacement for Amazon S3. Works with boto3, the AWS SDK, AWS CLI, and any S3-compatible client without code changes.
+  </Card>
+  <Card title="Client-side encryption" icon="lock">
+    HPKE-based end-to-end encryption runs on your device. Storage nodes receive only ciphertext and never hold your encryption keys.
+  </Card>
+  <Card title="Post-quantum security" icon="atom">
+    Hybrid X25519 + ML-KEM-768 key encapsulation (NIST FIPS 203). Protects your data against both classical and quantum adversaries.
+  </Card>
+  <Card title="IPFS-backed storage" icon="network-wired">
+    Data is pinned across a distributed IPFS Cluster with BLAKE3/Bao verified streaming for integrity from untrusted nodes.
+  </Card>
+  <Card title="CRDT metadata sync" icon="arrows-rotate">
+    Conflict-free replicated data types enable distributed metadata updates without coordination or write locks.
+  </Card>
+  <Card title="Prolly Tree indexing" icon="chart-tree-map">
+    Probabilistic B-trees provide O(log n) bucket operations and efficient range queries over large object listings.
+  </Card>
+</CardGroup>
+
+## Supported S3 operations
+
+All standard bucket and object operations are supported, including multipart uploads for large files.
+
+| Operation | Status |
+|---|---|
+| `CreateBucket` | Supported |
+| `DeleteBucket` | Supported |
+| `ListBuckets` | Supported |
+| `HeadBucket` | Supported |
+| `PutObject` | Supported |
+| `GetObject` | Supported |
+| `DeleteObject` | Supported |
+| `HeadObject` | Supported |
+| `CopyObject` | Supported |
+| `ListObjectsV2` | Supported |
+| `CreateMultipartUpload` | Supported |
+| `UploadPart` | Supported |
+| `CompleteMultipartUpload` | Supported |
+| `AbortMultipartUpload` | Supported |
+| `ListParts` | Supported |
+| `ListMultipartUploads` | Supported |
+
+## Crates
+
+| Crate | Description |
+|---|---|
+| `fula-crypto` | Quantum-safe cryptography: Hybrid X25519+ML-KEM, HPKE, BLAKE3, Bao |
+| `fula-blockstore` | IPFS block storage and chunking |
+| `fula-core` | Storage engine: Prolly Trees, CRDTs, bucket management |
+| `fula-cli` | S3-compatible gateway server |
+| `fula-client` | Client SDK with optional encryption support |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Upload your first file in minutes using AWS CLI, boto3, JavaScript, or the Rust SDK.
+  </Card>
+  <Card title="Authentication" icon="key" href="/authentication">
+    Learn how JWT tokens work with the S3 credential format and how to obtain one.
+  </Card>
+  <Card title="Client-side encryption" icon="shield-halved" href="/guides/encryption">
+    Encrypt files before they leave your device using the `EncryptedClient` SDK.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/buckets">
+    Explore the full S3-compatible API: buckets, objects, and multipart uploads.
+  </Card>
+</CardGroup>

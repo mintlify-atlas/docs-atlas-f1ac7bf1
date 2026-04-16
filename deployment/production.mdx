@@ -1,0 +1,109 @@
+---
+title: "Deploy Fula Storage to production on Ubuntu"
+description: "Harden and deploy the Fula gateway on Ubuntu with nginx TLS, Let's Encrypt, fail2ban, UFW firewall, and a systemd service via the install script."
+---
+
+For internet-facing deployments, the Fula repository includes `install.sh` — a production hardening script for Ubuntu. It automates the full setup so you get a secure, maintainable deployment without manual configuration of each system component.
+
+## What the installer does
+
+Running `install.sh` performs the following on a fresh Ubuntu server:
+
+- Installs Docker and all required system dependencies
+- Configures **nginx** as a reverse proxy with **TLS via Let's Encrypt** (Certbot)
+- Applies nginx-level **rate limiting** to absorb traffic spikes before they reach the gateway
+- Installs and configures **fail2ban** to block repeated failed authentication attempts
+- Configures **UFW** firewall rules to expose only ports 80, 443, and SSH
+- Creates a **systemd service** (`fula-gateway`) for process supervision and automatic restart
+- Optionally installs and configures a local **IPFS node**
+
+<Warning>
+  The installer is designed for Ubuntu and must be run as root. It modifies system-wide nginx, UFW, and systemd configuration. Run it only on a dedicated server or VM, not a shared environment.
+</Warning>
+
+## Deploy with the installer
+
+<Steps>
+  <Step title="Download and run the install script">
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/functionland/fula-api/main/install.sh | sudo bash
+    ```
+
+    The script pulls the latest version of `install.sh` directly from the repository and executes it with root privileges.
+  </Step>
+
+  <Step title="Follow the interactive prompts">
+    The installer will ask for:
+
+    - **Domain name** — the fully qualified domain name pointing to this server (e.g. `storage.example.com`). DNS must already resolve to the server's IP before running the installer.
+    - **Email address** — used by Let's Encrypt for certificate renewal notifications.
+    - **Whether to install a local IPFS node** — choose yes if you do not have an existing IPFS node to connect to.
+  </Step>
+
+  <Step title="Set JWT_SECRET in the environment file">
+    After the installer completes, open the gateway environment file and set a strong secret:
+
+    ```bash
+    sudo nano /etc/fula/.env
+    ```
+
+    Replace the placeholder value:
+
+    ```bash /etc/fula/.env
+    JWT_SECRET=replace-with-a-strong-random-secret
+    ```
+
+    Generate a suitable value with:
+
+    ```bash
+    openssl rand -base64 32
+    ```
+  </Step>
+
+  <Step title="Start the gateway service">
+    ```bash
+    sudo systemctl start fula-gateway
+    ```
+
+    Enable the service to start automatically on boot:
+
+    ```bash
+    sudo systemctl enable fula-gateway
+    ```
+  </Step>
+
+  <Step title="Check service status">
+    ```bash
+    systemctl status fula-gateway
+    ```
+
+    A healthy service shows `active (running)`. To follow live logs:
+
+    ```bash
+    journalctl -u fula-gateway -f
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  Keep `FULA_NO_AUTH=false` in `/etc/fula/.env` at all times in production. Disabling authentication allows any client to read and write data without credentials.
+</Tip>
+
+## Updating a production deployment
+
+When a new version is available, pull the latest code and rebuild the gateway image in place. The systemd service manages the restart.
+
+```bash
+cd ~/fula-api
+git pull
+rsync -a --delete /root/fula-api/ /opt/fula-api/
+cp docker-compose.yml /etc/fula/
+docker-compose -f /etc/fula/docker-compose.yml build --no-cache gateway
+systemctl restart fula-gateway
+```
+
+The `rsync` step syncs the updated source into the deployment directory at `/opt/fula-api/`. The `--no-cache` flag forces a full image rebuild so the running binary reflects the latest code.
+
+<Warning>
+  Do not change `JWT_SECRET` on a running production deployment without a coordinated migration. All existing JWT tokens are signed with the current secret — rotating it immediately invalidates every active token and will break connected clients until they re-authenticate.
+</Warning>

@@ -1,0 +1,175 @@
+---
+title: "Bucket operations: create, list, delete buckets"
+description: "S3 API endpoints for managing buckets in Fula Storage: ListBuckets, CreateBucket, HeadBucket, and DeleteBucket with request and response details."
+---
+
+Fula Storage buckets are the top-level containers for your objects. Each authenticated user has an isolated bucket namespace, so multiple users can create buckets with the same name without any conflict. All bucket operations require a Bearer JWT obtained via the OAuth 2.0 flow at `https://auth.fx.land`. Bucket names must be 3–63 characters, lowercase alphanumeric, and may include hyphens and dots.
+
+---
+
+## GET / — ListBuckets
+
+Returns a list of all buckets owned by the authenticated user. Results include the bucket name and creation timestamp. Because namespaces are per-user, this endpoint never surfaces another user's buckets.
+
+**Auth:** `storage:read` scope — `Authorization: Bearer <token>`
+
+### Response fields
+
+<ResponseField name="Owner.ID" type="string">
+  Canonical user ID of the bucket owner.
+</ResponseField>
+
+<ResponseField name="Owner.DisplayName" type="string">
+  Human-readable display name of the owner.
+</ResponseField>
+
+<ResponseField name="Buckets[].Name" type="string">
+  Bucket name.
+</ResponseField>
+
+<ResponseField name="Buckets[].CreationDate" type="string">
+  ISO 8601 timestamp when the bucket was created.
+</ResponseField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Bucket list returned as `ListAllMyBucketsResult` XML |
+| `401` | Missing or invalid Bearer token |
+| `500` | Internal server error |
+
+### Example
+
+```bash curl
+curl --request GET \
+  --url https://gateway.fx.land/ \
+  --header 'Authorization: Bearer <token>'
+```
+
+**Response body:**
+
+```xml 200 OK
+<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner>
+    <ID>79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be</ID>
+    <DisplayName>user@example.com</DisplayName>
+  </Owner>
+  <Buckets>
+    <Bucket>
+      <Name>my-bucket</Name>
+      <CreationDate>2025-12-01T12:00:00.000Z</CreationDate>
+    </Bucket>
+    <Bucket>
+      <Name>photos-2025</Name>
+      <CreationDate>2025-12-05T08:30:00.000Z</CreationDate>
+    </Bucket>
+  </Buckets>
+</ListAllMyBucketsResult>
+```
+
+---
+
+## PUT /{bucket} — CreateBucket
+
+Creates a new bucket with the specified name in the caller's isolated namespace. If another user already owns a bucket with the same name, this operation still succeeds — namespaces do not overlap. The response includes a `Location` header pointing to the new bucket URI.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Name of the bucket to create. Must match `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`.
+</ParamField>
+
+<ParamField header="x-amz-acl" type="string" default="private">
+  Canned ACL for the bucket. One of: `private`, `public-read`, `public-read-write`, `authenticated-read`.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Bucket created. `Location` header contains the bucket URI |
+| `409` | `BucketAlreadyExists` — you already own a bucket with this name |
+| `500` | Internal server error |
+
+### Example
+
+```bash curl
+curl --request PUT \
+  --url https://gateway.fx.land/my-new-bucket \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+## HEAD /{bucket} — HeadBucket
+
+Checks whether the specified bucket exists and whether the caller has permission to access it. No response body is returned; existence is indicated by the HTTP status code alone.
+
+**Auth:** `storage:read` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Name of the bucket to check.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Bucket exists and caller has access |
+| `403` | `AccessDenied` — bucket exists but caller lacks permission |
+| `404` | `NoSuchBucket` — bucket does not exist |
+
+### Example
+
+```bash curl
+curl --request HEAD \
+  --url https://gateway.fx.land/my-bucket \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+## DELETE /{bucket} — DeleteBucket
+
+Permanently deletes an empty bucket. The bucket must contain no objects before this call succeeds. IPFS pins for any previously deleted objects are garbage-collected asynchronously, but the bucket itself is removed immediately.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Name of the bucket to delete. Must be empty.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `204` | Bucket deleted successfully |
+| `404` | `NoSuchBucket` — bucket does not exist |
+| `409` | `BucketNotEmpty` — bucket still contains objects |
+
+### Example
+
+```bash curl
+curl --request DELETE \
+  --url https://gateway.fx.land/my-bucket \
+  --header 'Authorization: Bearer <token>'
+```
+
+**409 BucketNotEmpty response body:**
+
+```xml 409 Conflict
+<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>BucketNotEmpty</Code>
+  <Message>The bucket you tried to delete is not empty</Message>
+  <BucketName>my-bucket</BucketName>
+</Error>
+```

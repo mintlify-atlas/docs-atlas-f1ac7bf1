@@ -1,0 +1,108 @@
+{
+  "projectType": "api-service",
+  "projectName": "Fula Storage API",
+  "projectDescription": "An S3-compatible decentralized storage gateway backed by IPFS with client-side quantum-safe encryption.",
+  "theme": "luma",
+  "primaryColor": "#2a9d8b",
+  "lightColor": "#0c4c3c",
+  "darkColor": "#202121",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/encryption",
+              "guides/large-files",
+              "guides/s3-compatibility",
+              "guides/platform-sdks"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/security",
+              "architecture/ipfs-storage"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/configuration",
+              "deployment/production"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "S3 API",
+            "pages": [
+              "api/buckets",
+              "api/objects",
+              "api/multipart",
+              "api/metadata"
+            ]
+          },
+          {
+            "group": "Client SDKs",
+            "pages": [
+              "sdk/rust",
+              "sdk/python",
+              "sdk/javascript",
+              "sdk/flutter"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Full S3 API compatibility (AWS CLI, boto3, AWS SDK)",
+    "Client-side HPKE encryption — storage nodes never see plaintext",
+    "Post-quantum cryptography (Hybrid X25519 + ML-KEM-768, NIST FIPS 203)",
+    "BLAKE3/Bao verified streaming for data integrity",
+    "IPFS-backed distributed storage with IPFS Cluster pinning",
+    "FlatNamespace mode for complete file structure hiding",
+    "CRDT-based metadata for conflict-free distributed updates",
+    "Prolly Tree indexing for O(log n) bucket operations",
+    "Multipart upload for large files with progress callbacks",
+    "Per-user bucket namespace isolation"
+  ],
+  "publicApiSurface": [
+    "GET / — ListBuckets",
+    "PUT /{bucket} — CreateBucket",
+    "DELETE /{bucket} — DeleteBucket",
+    "HEAD /{bucket} — HeadBucket",
+    "GET /{bucket}?list-type=2 — ListObjectsV2",
+    "PUT /{bucket}/{key} — PutObject",
+    "GET /{bucket}/{key} — GetObject",
+    "DELETE /{bucket}/{key} — DeleteObject",
+    "HEAD /{bucket}/{key} — HeadObject",
+    "POST /{bucket}/{key}?uploads — CreateMultipartUpload",
+    "PUT /{bucket}/{key}?uploadId&partNumber — UploadPart",
+    "POST /{bucket}/{key}?uploadId — CompleteMultipartUpload",
+    "DELETE /{bucket}/{key}?uploadId — AbortMultipartUpload",
+    "FulaClient::new(Config) — Rust SDK client constructor",
+    "FulaClient::create_bucket / put_object / get_object / delete_object",
+    "EncryptedClient::new(Config, EncryptionConfig) — Encrypted Rust SDK",
+    "EncryptedClient::put_object_flat / list_files_from_forest",
+    "upload_large_file() — multipart helper with progress callbacks",
+    "HybridKeyPair::generate() — quantum-safe keypair generation",
+    "hybrid_encapsulate / hybrid_decapsulate — KEM operations"
+  ]
+}

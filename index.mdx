@@ -1,97 +1,58 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Fula Storage API: S3-Compatible Decentralized Storage"
+description: "Store data on the Fula network using any S3-compatible tool. Quantum-safe encryption, IPFS-backed persistence, and full AWS S3 API compatibility."
 ---
 
-## Setting up
+Fula Storage provides an Amazon S3-compatible API backed by a decentralized network of IPFS nodes. Use any S3 tool you already know — AWS CLI, boto3, or the AWS SDK — while your data is protected by client-side quantum-safe encryption and stored across a resilient distributed network.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Upload your first file in minutes using AWS CLI, boto3, or the Rust SDK.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Authentication" icon="key" href="/authentication">
+    Learn how to authenticate with JWT tokens and AWS Signature V4.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="S3 API Reference" icon="code" href="/api/buckets">
+    Explore the full S3-compatible API: buckets, objects, and multipart uploads.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Client-Side Encryption" icon="shield-halved" href="/guides/encryption">
+    Encrypt files before they leave your device using quantum-safe HPKE cryptography.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Fula Storage?
 
-Everything you need to create world-class documentation.
+Fula Storage combines the familiarity of the S3 API with the resilience of decentralized storage and the privacy of end-to-end encryption — all without changing how you write code.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="S3 Compatibility" icon="cloud" href="/guides/s3-compatibility">
+    Drop-in replacement for S3. Works with boto3, AWS SDK, AWS CLI, and any S3-compatible client.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Quantum-Safe Security" icon="atom" href="/architecture/security">
+    Hybrid X25519 + ML-KEM-768 (NIST FIPS 203) encryption. Post-quantum safe from day one.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="IPFS-Backed Storage" icon="network-wired" href="/architecture/ipfs-storage">
+    Data is pinned across a distributed IPFS Cluster with content-addressed deduplication.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Platform SDKs" icon="mobile-screen" href="/guides/platform-sdks">
+    Native SDKs for Rust, Python, JavaScript, and Flutter (Android, iOS, Web, Windows).
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Get started in 3 steps
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Get a JWT token">
+    Authenticate with your Functionland account at `https://auth.fx.land` to receive a JWT access token. See the [Authentication guide](/authentication) for details.
+  </Step>
+  <Step title="Configure your S3 client">
+    Set your endpoint to `https://s3.cloud.fx.land` and use `JWT:<your-token>` as the access key ID. Any S3-compatible tool works without modification.
+  </Step>
+  <Step title="Create a bucket and upload">
+    Use your existing S3 tooling to create buckets and upload objects. For private data, use the [Encrypted Client SDK](/guides/encryption) to encrypt files before they leave your device.
+  </Step>
+</Steps>
+
+<Note>
+  Raw S3 tools (AWS CLI, boto3) upload plaintext data that gateway operators can read. For private files, use the [Encrypted Client SDK](/guides/encryption) to ensure client-side encryption.
+</Note>

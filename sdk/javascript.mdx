@@ -1,0 +1,369 @@
+---
+title: 'JavaScript SDK: use Fula Storage with AWS SDK v3'
+description: 'Connect to Fula Storage from JavaScript or TypeScript using @aws-sdk/client-s3. Configure the endpoint, pass a JWT token, and use standard S3 commands.'
+---
+
+The AWS SDK for JavaScript v3 (`@aws-sdk/client-s3`) works with Fula Storage without modification. Authenticate by embedding your JWT token in the `accessKeyId` credential with a `JWT:` prefix. The `secretAccessKey` is sent but ignored by the gateway.
+
+<Warning>
+  The AWS SDK for JavaScript sends data as plaintext to the Fula gateway. The gateway operator can read every object you upload. For private data, use the [Rust Encrypted Client SDK](/sdk/rust), which performs client-side AES-256-GCM encryption before any data leaves your process.
+</Warning>
+
+## Installation
+
+<Tabs>
+  <Tab title="npm">
+    ```bash
+    npm install @aws-sdk/client-s3
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash
+    yarn add @aws-sdk/client-s3
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash
+    pnpm add @aws-sdk/client-s3
+    ```
+  </Tab>
+</Tabs>
+
+## Client configuration
+
+```javascript
+import { S3Client } from "@aws-sdk/client-s3";
+
+const jwtToken = "your-jwt-token-here";
+
+const s3 = new S3Client({
+  endpoint: "https://s3.cloud.fx.land",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: `JWT:${jwtToken}`,
+    secretAccessKey: "not-used",
+  },
+});
+```
+
+<Note>
+  `forcePathStyle: true` is required. Fula's gateway routes requests by path (`/bucket/key`), not by virtual-hosted subdomain (`bucket.gateway.example/key`). Without this flag, the SDK will construct URLs that the gateway cannot match.
+</Note>
+
+### TypeScript configuration
+
+```typescript
+import { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
+
+const jwtToken: string = process.env.FULA_JWT_TOKEN ?? "";
+
+const clientConfig: S3ClientConfig = {
+  endpoint: "https://s3.cloud.fx.land",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: `JWT:${jwtToken}`,
+    secretAccessKey: "not-used",
+  },
+};
+
+const s3 = new S3Client(clientConfig);
+```
+
+---
+
+## Basic operations
+
+### Create a bucket
+
+```javascript
+import { CreateBucketCommand } from "@aws-sdk/client-s3";
+
+await s3.send(new CreateBucketCommand({ Bucket: "my-bucket" }));
+```
+
+### Upload an object
+
+```javascript
+import { PutObjectCommand } from "@aws-sdk/client-s3";
+
+await s3.send(new PutObjectCommand({
+  Bucket: "my-bucket",
+  Key: "hello.txt",
+  Body: "Hello World!",
+  ContentType: "text/plain",
+}));
+```
+
+Upload a `Buffer` in Node.js:
+
+```javascript
+import { readFileSync } from "fs";
+
+await s3.send(new PutObjectCommand({
+  Bucket: "my-bucket",
+  Key: "image.png",
+  Body: readFileSync("./image.png"),
+  ContentType: "image/png",
+}));
+```
+
+### Download an object
+
+```javascript
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+
+const response = await s3.send(new GetObjectCommand({
+  Bucket: "my-bucket",
+  Key: "hello.txt",
+}));
+
+// response.Body is a ReadableStream — collect to a string
+const text = await response.Body.transformToString();
+console.log(text);
+```
+
+#### Streaming response (Node.js)
+
+For large objects, pipe the stream directly to avoid loading the full body into memory:
+
+```javascript
+import { createWriteStream } from "fs";
+import { pipeline } from "stream/promises";
+
+const response = await s3.send(new GetObjectCommand({
+  Bucket: "my-bucket",
+  Key: "large-file.bin",
+}));
+
+await pipeline(
+  response.Body,
+  createWriteStream("./large-file.bin"),
+);
+```
+
+### Delete an object
+
+```javascript
+import { DeleteObjectCommand } from "@aws-sdk/client-s3";
+
+await s3.send(new DeleteObjectCommand({
+  Bucket: "my-bucket",
+  Key: "hello.txt",
+}));
+```
+
+### List objects
+
+```javascript
+import { ListObjectsV2Command } from "@aws-sdk/client-s3";
+
+const response = await s3.send(new ListObjectsV2Command({
+  Bucket: "my-bucket",
+  Prefix: "data/",
+  MaxKeys: 100,
+}));
+
+for (const obj of response.Contents ?? []) {
+  console.log(`${obj.Key}  (${obj.Size} bytes)`);
+}
+```
+
+Paginate through large buckets:
+
+```javascript
+import { paginateListObjectsV2 } from "@aws-sdk/client-s3";
+
+const paginator = paginateListObjectsV2(
+  { client: s3 },
+  { Bucket: "my-bucket" },
+);
+
+for await (const page of paginator) {
+  for (const obj of page.Contents ?? []) {
+    console.log(obj.Key);
+  }
+}
+```
+
+---
+
+## Node.js vs browser
+
+<Tabs>
+  <Tab title="Node.js">
+    All features work in Node.js 18+. Use `Buffer` or `Readable` streams for `Body`. The `pipeline` API from `stream/promises` is recommended for large downloads.
+
+    ```javascript
+    // Node.js: read a file and upload
+    import { readFile } from "fs/promises";
+    import { PutObjectCommand } from "@aws-sdk/client-s3";
+
+    const data = await readFile("./document.pdf");
+    await s3.send(new PutObjectCommand({
+      Bucket: "my-bucket",
+      Key: "document.pdf",
+      Body: data,
+      ContentType: "application/pdf",
+    }));
+    ```
+  </Tab>
+  <Tab title="Browser">
+    In the browser, pass a `Blob`, `File`, `ReadableStream`, or `Uint8Array` as `Body`. Make sure the Fula gateway is configured to respond with the correct CORS headers for your origin.
+
+    ```javascript
+    // Browser: upload a file selected by the user
+    const fileInput = document.querySelector('input[type="file"]');
+    const file = fileInput.files[0];
+
+    await s3.send(new PutObjectCommand({
+      Bucket: "my-bucket",
+      Key: file.name,
+      Body: file,
+      ContentType: file.type,
+    }));
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Complete example
+
+<CodeGroup>
+
+```javascript javascript
+import {
+  S3Client,
+  CreateBucketCommand,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
+
+const jwtToken = "your-jwt-token-here";
+
+const s3 = new S3Client({
+  endpoint: "https://s3.cloud.fx.land",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: `JWT:${jwtToken}`,
+    secretAccessKey: "not-used",
+  },
+});
+
+// Create bucket
+await s3.send(new CreateBucketCommand({ Bucket: "my-bucket" }));
+
+// Upload
+await s3.send(new PutObjectCommand({
+  Bucket: "my-bucket",
+  Key: "hello.txt",
+  Body: "Hello World!",
+}));
+
+// Download
+const response = await s3.send(new GetObjectCommand({
+  Bucket: "my-bucket",
+  Key: "hello.txt",
+}));
+const text = await response.Body.transformToString();
+console.log("Content:", text);
+
+// List
+const list = await s3.send(new ListObjectsV2Command({ Bucket: "my-bucket" }));
+for (const obj of list.Contents ?? []) {
+  console.log(obj.Key, obj.Size);
+}
+
+// Delete
+await s3.send(new DeleteObjectCommand({ Bucket: "my-bucket", Key: "hello.txt" }));
+```
+
+```typescript typescript
+import {
+  S3Client,
+  S3ClientConfig,
+  CreateBucketCommand,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectCommand,
+  _Object,
+} from "@aws-sdk/client-s3";
+
+const jwtToken: string = process.env.FULA_JWT_TOKEN ?? "";
+
+const config: S3ClientConfig = {
+  endpoint: "https://s3.cloud.fx.land",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: `JWT:${jwtToken}`,
+    secretAccessKey: "not-used",
+  },
+};
+
+const s3 = new S3Client(config);
+
+async function main(): Promise<void> {
+  await s3.send(new CreateBucketCommand({ Bucket: "my-bucket" }));
+
+  await s3.send(new PutObjectCommand({
+    Bucket: "my-bucket",
+    Key: "hello.txt",
+    Body: "Hello World!",
+    ContentType: "text/plain",
+  }));
+
+  const response = await s3.send(new GetObjectCommand({
+    Bucket: "my-bucket",
+    Key: "hello.txt",
+  }));
+  const text = await response.Body!.transformToString();
+  console.log("Content:", text);
+
+  const list = await s3.send(new ListObjectsV2Command({ Bucket: "my-bucket" }));
+  (list.Contents ?? []).forEach((obj: _Object) => {
+    console.log(obj.Key, obj.Size);
+  });
+
+  await s3.send(new DeleteObjectCommand({ Bucket: "my-bucket", Key: "hello.txt" }));
+}
+
+main().catch(console.error);
+```
+
+</CodeGroup>
+
+---
+
+## Error handling
+
+```javascript
+import { S3ServiceException } from "@aws-sdk/client-s3";
+
+try {
+  const response = await s3.send(new GetObjectCommand({
+    Bucket: "my-bucket",
+    Key: "missing.txt",
+  }));
+} catch (err) {
+  if (err instanceof S3ServiceException) {
+    if (err.name === "NoSuchKey") {
+      console.error("Object not found.");
+    } else if (err.name === "NoSuchBucket") {
+      console.error("Bucket does not exist.");
+    } else if (err.$response?.statusCode === 403) {
+      console.error("Access denied — check your JWT token.");
+    } else {
+      console.error(`S3 error [${err.name}]: ${err.message}`);
+    }
+  } else {
+    throw err;
+  }
+}
+```

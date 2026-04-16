@@ -1,0 +1,151 @@
+---
+title: 'Run Fula Storage with Docker Compose'
+description: 'Deploy the Fula Storage gateway locally or in production using Docker Compose. Includes IPFS node setup, environment configuration, and health checks.'
+---
+
+The fastest way to run the Fula Storage gateway is with Docker Compose. The included `docker-compose.yml` defines the gateway service along with optional Redis, Prometheus, and Grafana services for multi-node sync and monitoring. This guide walks you through a working local deployment.
+
+## Prerequisites
+
+- [Docker Engine](https://docs.docker.com/engine/install/) 20.10 or later
+- [Docker Compose](https://docs.docker.com/compose/install/) v2 or later
+- A strong random string to use as your `JWT_SECRET`
+
+## Getting started
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/functionland/fula-api
+    cd fula-api
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    Copy the example environment file and set a strong JWT secret before starting the gateway.
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    At minimum, replace the placeholder value for `JWT_SECRET`:
+
+    ```bash .env
+    JWT_SECRET=replace-with-a-strong-random-secret
+    ```
+
+    Generate a suitable secret with:
+
+    ```bash
+    openssl rand -base64 32
+    ```
+  </Step>
+
+  <Step title="Start the stack">
+    ```bash
+    docker-compose up -d
+    ```
+
+    Docker Compose will build the `gateway` image from the local `Dockerfile` and start the service in the background.
+  </Step>
+
+  <Step title="Verify with a health check">
+    ```bash
+    curl -f http://localhost:9000/healthz
+    ```
+
+    A `200 OK` response confirms the gateway is running and ready to accept S3 requests.
+  </Step>
+</Steps>
+
+<Note>
+  The gateway listens on `http://localhost:9000` by default. Point any S3-compatible client or SDK at this endpoint using the `JWT:<token>` credential format described in the [quick start](/quickstart).
+</Note>
+
+## Docker Compose services
+
+The `docker-compose.yml` file defines the following services:
+
+```yaml docker-compose.yml
+services:
+  # Fula Gateway - S3-Compatible API
+  gateway:
+    build:
+      context: /opt/fula-api
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - /var/lib/fula-gateway:/var/lib/fula-gateway
+    network_mode: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Redis - optional, for multi-gateway sync
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    profiles:
+      - full
+
+  # Prometheus - optional monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    profiles:
+      - monitoring
+
+  # Grafana - optional dashboards
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    profiles:
+      - monitoring
+```
+
+The `gateway` service runs by default. Redis, Prometheus, and Grafana are gated behind [Compose profiles](https://docs.docker.com/compose/profiles/) and only start when explicitly requested:
+
+```bash
+# Start gateway + Redis (multi-node sync)
+docker-compose --profile full up -d
+
+# Start gateway + Prometheus + Grafana (monitoring)
+docker-compose --profile monitoring up -d
+```
+
+## Environment variables
+
+The gateway reads configuration from the `.env` file via the `env_file` directive. The three variables most commonly set for a basic deployment are:
+
+| Variable | Default | Description |
+|---|---|---|
+| `JWT_SECRET` | *(required)* | Secret used to validate JWT tokens. Must be changed from the placeholder. |
+| `IPFS_API_URL` | `http://localhost:5001` | URL of the IPFS node API used for block operations. |
+| `FULA_PORT` | `9000` | Port the gateway binds to. |
+
+See [Configuration](/deployment/configuration) for the complete variable reference.
+
+## Checking logs
+
+```bash
+docker-compose logs -f gateway
+```
+
+Use `Ctrl+C` to stop following. To see the last 100 lines only:
+
+```bash
+docker-compose logs --tail=100 gateway
+```

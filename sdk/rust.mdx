@@ -1,0 +1,621 @@
+---
+title: 'Rust SDK reference for Fula Storage'
+description: 'Complete reference for the fula-client Rust SDK: FulaClient, EncryptedClient, Config, multipart uploads, and progress callbacks with real code examples.'
+---
+
+The `fula-client` crate is the native Rust SDK for Fula Storage. It exposes two client types — `FulaClient` for plain S3-compatible operations and `EncryptedClient` for end-to-end encrypted storage using HPKE — plus helpers for multipart uploads with progress callbacks. All async operations require a Tokio runtime.
+
+## Installation
+
+Add the crate to your `Cargo.toml`:
+
+```toml Cargo.toml
+[dependencies]
+fula-client = { git = "https://github.com/functionland/fula-api", version = "0.2" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+```
+
+Run examples directly from the repository:
+
+```bash
+cargo run --example basic_usage
+cargo run --example encrypted_storage
+```
+
+## Public exports
+
+Every public item re-exported from `lib.rs`:
+
+```rust
+pub use client::FulaClient;
+pub use config::Config;
+pub use encryption::{EncryptedClient, EncryptionConfig, DecryptedObjectInfo, FileMetadata, DirectoryListing, PinningCredentials};
+pub use error::{ClientError, Result};
+pub use multipart::{MultipartUpload, UploadProgress, ProgressCallback, upload_large_file};
+pub use types::*;
+
+// Crypto types for encryption configuration
+pub use fula_crypto::private_metadata::KeyObfuscation;
+pub use fula_crypto::private_forest::{PrivateForest, ForestFileEntry, ForestDirectoryEntry};
+```
+
+---
+
+## `Config`
+
+`Config` holds all connection parameters for a client. Every field has a sensible default so you can use struct update syntax (`..Default::default()`).
+
+<ParamField path="endpoint" type="String" required>
+  Gateway URL. Defaults to `"http://localhost:9000"`.
+</ParamField>
+
+<ParamField path="access_token" type="Option<String>">
+  JWT token sent as a `Bearer` header. Omit for unauthenticated local development.
+</ParamField>
+
+<ParamField path="timeout" type="Duration">
+  Per-request timeout. Defaults to 30 seconds. Ignored on WASM targets.
+</ParamField>
+
+<ParamField path="encryption_enabled" type="bool">
+  Signals intent to use encryption. Defaults to `false`. Set with `.with_encryption()`.
+</ParamField>
+
+<ParamField path="max_retries" type="u32">
+  Maximum retry attempts on transient errors. Defaults to `3`.
+</ParamField>
+
+<ParamField path="multipart_threshold" type="u64">
+  File size in bytes above which multipart upload is recommended. Defaults to 100 MB.
+</ParamField>
+
+<ParamField path="multipart_chunk_size" type="u64">
+  Size of each multipart chunk in bytes. Defaults to 256 KB (must remain under 1 MB for IPFS block limits).
+</ParamField>
+
+### Builder methods
+
+```rust
+use fula_client::Config;
+use std::time::Duration;
+
+// Minimal: endpoint only
+let config = Config::new("https://s3.cloud.fx.land");
+
+// With JWT token
+let config = Config::new("https://s3.cloud.fx.land")
+    .with_token("your-jwt-token-here");
+
+// Full builder chain
+let config = Config::new("https://s3.cloud.fx.land")
+    .with_token("your-jwt-token-here")
+    .with_encryption()
+    .with_timeout(Duration::from_secs(60));
+```
+
+---
+
+## `FulaClient`
+
+`FulaClient` is the basic S3-compatible client. It speaks directly to the gateway over HTTP/HTTPS and does **not** encrypt data on the client.
+
+### Constructor
+
+```rust
+pub fn new(config: Config) -> Result<Self>
+```
+
+```rust
+use fula_client::{FulaClient, Config};
+
+let client = FulaClient::new(
+    Config::new("http://localhost:9000").with_token("your-jwt-token-here")
+)?;
+```
+
+Convenience constructors for common cases:
+
+```rust
+// Connects to http://localhost:9000 with no token
+let client = FulaClient::default_local()?;
+
+// Endpoint only, no token
+let client = FulaClient::with_endpoint("http://localhost:9000")?;
+```
+
+### Bucket operations
+
+<Steps>
+  <Step title="Create a bucket">
+    ```rust
+    client.create_bucket("my-test-bucket").await?;
+    ```
+  </Step>
+  <Step title="List all buckets">
+    ```rust
+    let result = client.list_buckets().await?;
+    for bucket in &result.buckets {
+        println!("{} (created: {})", bucket.name, bucket.creation_date);
+    }
+    ```
+  </Step>
+  <Step title="Check existence">
+    ```rust
+    let exists = client.bucket_exists("my-test-bucket").await?;
+    ```
+  </Step>
+  <Step title="Delete a bucket">
+    ```rust
+    // Bucket must be empty before deletion.
+    client.delete_bucket("my-test-bucket").await?;
+    ```
+  </Step>
+</Steps>
+
+### Object operations
+
+<CodeGroup>
+
+```rust put_object
+let result = client.put_object(
+    "my-test-bucket",
+    "hello.txt",
+    b"Hello, World! This is stored on IPFS.".to_vec(),
+).await?;
+println!("ETag: {}", result.etag);
+```
+
+```rust get_object
+let data = client.get_object("my-test-bucket", "hello.txt").await?;
+println!("Content: {}", String::from_utf8_lossy(&data));
+```
+
+```rust delete_object
+client.delete_object("my-test-bucket", "hello-copy.txt").await?;
+```
+
+</CodeGroup>
+
+#### `list_objects`
+
+```rust
+use fula_client::ListObjectsOptions;
+
+// List objects under a prefix
+let result = client.list_objects(
+    "my-test-bucket",
+    Some(ListObjectsOptions {
+        prefix: Some("data/".to_string()),
+        ..Default::default()
+    }),
+).await?;
+
+for obj in &result.objects {
+    println!("{} ({} bytes)", obj.key, obj.size);
+}
+
+// Use a delimiter to simulate directory listings
+let result = client.list_objects(
+    "my-test-bucket",
+    Some(ListObjectsOptions {
+        delimiter: Some("/".to_string()),
+        ..Default::default()
+    }),
+).await?;
+
+println!("Files: {:?}", result.objects);
+println!("Folders: {:?}", result.common_prefixes);
+```
+
+<ParamField path="prefix" type="Option<String>">
+  Filter to keys beginning with this string.
+</ParamField>
+
+<ParamField path="delimiter" type="Option<String>">
+  Group keys by this delimiter. Common prefixes are returned separately, simulating a directory listing.
+</ParamField>
+
+<ParamField path="max_keys" type="Option<u32>">
+  Maximum number of objects to return per page.
+</ParamField>
+
+<ParamField path="continuation_token" type="Option<String>">
+  Token from a previous truncated response to fetch the next page.
+</ParamField>
+
+#### Additional object methods
+
+```rust
+// Put with explicit content-type and user metadata
+use fula_client::ObjectMetadata;
+
+let metadata = ObjectMetadata::new()
+    .with_content_type("application/json")
+    .with_metadata("x-custom-tag", "v1");
+
+client.put_object_with_metadata("bucket", "data.json", data, Some(metadata)).await?;
+
+// Head: metadata only, no body download
+let head = client.head_object("bucket", "hello.txt").await?;
+println!("Size: {} bytes", head.content_length);
+
+// Existence check (uses HEAD internally)
+let exists = client.object_exists("bucket", "hello.txt").await?;
+
+// Copy within or across buckets
+let copy = client.copy_object("src-bucket", "src.txt", "dst-bucket", "dst.txt").await?;
+println!("Copied ETag: {}", copy.etag);
+```
+
+### Complete basic example
+
+```rust
+use fula_client::{FulaClient, Config, ListObjectsOptions};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let config = Config::new("http://localhost:9000")
+        .with_token("your-jwt-token-here");
+    let client = FulaClient::new(config)?;
+
+    client.create_bucket("my-test-bucket").await?;
+
+    // Upload a text file
+    let result = client.put_object(
+        "my-test-bucket",
+        "hello.txt",
+        b"Hello, World! This is stored on IPFS.".to_vec(),
+    ).await?;
+    println!("Uploaded with ETag: {}", result.etag);
+
+    // Upload a JSON config
+    let json_data = json!({
+        "app": "fula-example",
+        "version": "1.0.0",
+        "settings": { "encryption": true, "replication": 3 }
+    });
+    client.put_object(
+        "my-test-bucket",
+        "data/config.json",
+        serde_json::to_vec_pretty(&json_data)?,
+    ).await?;
+
+    // List with prefix
+    let list = client.list_objects(
+        "my-test-bucket",
+        Some(ListObjectsOptions { prefix: Some("data/".to_string()), ..Default::default() }),
+    ).await?;
+    for obj in &list.objects {
+        println!("{} ({} bytes)", obj.key, obj.size);
+    }
+
+    // Download
+    let data = client.get_object("my-test-bucket", "hello.txt").await?;
+    println!("Content: {}", String::from_utf8_lossy(&data));
+
+    // Cleanup
+    let all = client.list_objects("my-test-bucket", None).await?;
+    for obj in all.objects {
+        client.delete_object("my-test-bucket", &obj.key).await?;
+    }
+    client.delete_bucket("my-test-bucket").await?;
+
+    Ok(())
+}
+```
+
+---
+
+## `EncryptionConfig`
+
+`EncryptionConfig` controls key management and metadata privacy for `EncryptedClient`.
+
+<ParamField path="key_manager" type="Arc<KeyManager>">
+  Holds the HPKE keypair used to wrap per-object DEKs. Generated automatically when you call `EncryptionConfig::new()`.
+</ParamField>
+
+<ParamField path="metadata_privacy" type="bool">
+  When `true`, file names and directory structure are hidden from the gateway. Enabled by default.
+</ParamField>
+
+<ParamField path="obfuscation_mode" type="KeyObfuscation">
+  Controls how storage keys are derived. Defaults to `FlatNamespace`.
+</ParamField>
+
+### Constructors
+
+```rust
+use fula_client::EncryptionConfig;
+
+// Default: FlatNamespace + metadata privacy ON (recommended)
+let enc = EncryptionConfig::new();
+
+// Explicitly request FlatNamespace
+let enc = EncryptionConfig::new_flat_namespace();
+
+// Disable metadata privacy (filenames visible to the gateway)
+let enc = EncryptionConfig::new_without_privacy();
+
+// Restore from a previously exported secret key
+use fula_crypto::keys::SecretKey;
+let secret = SecretKey::from_base64(&stored_b64)?;
+let enc = EncryptionConfig::from_secret_key(secret);
+```
+
+### Key export and public key
+
+```rust
+// Export for backup — store securely, never log
+let secret_key = enc.export_secret_key();
+let b64 = secret_key.to_base64();
+
+// Share your public key so others can encrypt data for you
+let public_key = enc.public_key();
+println!("Public key: {}", public_key.to_base64());
+```
+
+<Warning>
+  If you lose the secret key, encrypted data is unrecoverable. Store it in a hardware security module, platform keychain, or other secure storage. Never commit it to source control or include it in logs.
+</Warning>
+
+---
+
+## `EncryptedClient`
+
+`EncryptedClient` wraps `FulaClient` and transparently encrypts every object with AES-256-GCM. The DEK (data encryption key) for each object is wrapped with HPKE so only the key holder can decrypt.
+
+### Constructor
+
+```rust
+pub fn new(config: Config, encryption: EncryptionConfig) -> Result<Self>
+```
+
+```rust
+use fula_client::{Config, EncryptedClient, EncryptionConfig};
+
+let config = Config::new("http://localhost:9000")
+    .with_token("your-jwt-token-here")
+    .with_encryption();
+
+let encryption = EncryptionConfig::new();
+let client = EncryptedClient::new(config, encryption)?;
+```
+
+### FlatNamespace: put and get
+
+Use `put_object_flat` / `get_object_flat` when FlatNamespace mode is active (the default). The client maintains an encrypted PrivateForest index that maps original paths to obfuscated storage keys.
+
+```rust
+// Upload — forest index is saved automatically after each call
+client.put_object_flat(
+    "my-bucket",
+    "/photos/vacation/beach.jpg",
+    image_bytes,
+    Some("image/jpeg"),
+).await?;
+
+// Download by original path — forest is consulted for the storage key
+let data = client.get_object_flat("my-bucket", "/photos/vacation/beach.jpg").await?;
+```
+
+<Tip>
+  For bulk uploads, use `put_object_flat_deferred` in a loop and call `flush_forest` once at the end. This is far more efficient than saving the forest after every file.
+</Tip>
+
+```rust
+for file in files {
+    client.put_object_flat_deferred("bucket", &file.path, file.data, None).await?;
+}
+// Persist the in-memory forest index to encrypted storage
+client.flush_forest("bucket").await?;
+```
+
+### List files from forest
+
+```rust
+// Returns Vec<FileMetadata> with original paths — no extra network requests
+let files = client.list_files_from_forest("my-bucket").await?;
+for f in files {
+    println!("{} ({} bytes)", f.original_key, f.original_size);
+}
+```
+
+### Standard encrypted operations
+
+If you need the non-FlatNamespace encrypted API:
+
+```rust
+// Upload with deterministic-hash key obfuscation
+client.put_object_encrypted(
+    "encrypted-bucket",
+    "secrets/api-keys.json",
+    sensitive_data.as_bytes().to_vec(),
+).await?;
+
+// Download and decrypt
+let decrypted = client.get_object_decrypted(
+    "encrypted-bucket",
+    "secrets/api-keys.json",
+).await?;
+```
+
+### Key recovery
+
+```rust
+use fula_client::{Config, EncryptedClient, EncryptionConfig};
+use fula_crypto::keys::SecretKey;
+
+// Export before the session ends
+let secret_b64 = encryption.export_secret_key().to_base64();
+
+// Later — restore from the saved base-64 string
+let recovered_secret = SecretKey::from_base64(&secret_b64)?;
+let recovered_enc = EncryptionConfig::from_secret_key(recovered_secret);
+
+let config = Config::new("http://localhost:9000").with_token("your-jwt-token-here");
+let recovered_client = EncryptedClient::new(config, recovered_enc)?;
+
+let decrypted = recovered_client.get_object_decrypted(
+    "encrypted-bucket",
+    "secrets/api-keys.json",
+).await?;
+```
+
+### Complete encryption example
+
+```rust
+use fula_client::{Config, EncryptedClient, EncryptionConfig};
+use fula_crypto::keys::SecretKey;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Generate encryption configuration (new keypair)
+    let encryption = EncryptionConfig::new();
+
+    let public_key = encryption.public_key();
+    println!("Public Key: {}", public_key.to_base64());
+
+    let secret_b64 = encryption.export_secret_key().to_base64();
+    println!("Secret Key (store securely): {}...", &secret_b64[..20]);
+
+    let config = Config::new("http://localhost:9000")
+        .with_token("your-jwt-token-here")
+        .with_encryption();
+
+    let client = EncryptedClient::new(config, encryption)?;
+
+    client.create_bucket("encrypted-bucket").await?;
+
+    // Upload sensitive data — encrypted before it leaves your process
+    let sensitive_data = r#"{"api_key": "sk_live_abc123xyz"}"#;
+    client.put_object_encrypted(
+        "encrypted-bucket",
+        "secrets/api-keys.json",
+        sensitive_data.as_bytes().to_vec(),
+    ).await?;
+
+    // Download and decrypt
+    let decrypted = client.get_object_decrypted(
+        "encrypted-bucket",
+        "secrets/api-keys.json",
+    ).await?;
+    println!("Decrypted: {}", String::from_utf8_lossy(&decrypted));
+
+    // Cleanup
+    client.delete_object("encrypted-bucket", "secrets/api-keys.json").await?;
+    client.delete_bucket("encrypted-bucket").await?;
+
+    Ok(())
+}
+```
+
+---
+
+## Multipart uploads
+
+For large files, use the `upload_large_file` helper. It splits data into chunks (default 256 KB each, configurable via `Config::multipart_chunk_size`) and calls an optional progress callback after each part.
+
+### `UploadProgress`
+
+<ParamField path="bytes_uploaded" type="u64">
+  Bytes successfully uploaded so far.
+</ParamField>
+
+<ParamField path="total_bytes" type="u64">
+  Total size of the payload being uploaded.
+</ParamField>
+
+<ParamField path="current_part" type="u32">
+  The part number just completed (1-indexed).
+</ParamField>
+
+<ParamField path="total_parts" type="u32">
+  Total number of parts the upload is split into.
+</ParamField>
+
+```rust
+impl UploadProgress {
+    pub fn percentage(&self) -> f64 { /* ... */ }
+}
+```
+
+### `upload_large_file`
+
+```rust
+use fula_client::{FulaClient, Config};
+use fula_client::multipart::upload_large_file;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = Arc::new(FulaClient::new(
+        Config::new("http://localhost:9000").with_token("your-jwt-token-here")
+    )?);
+
+    let large_data = std::fs::read("large-file.bin")?;
+
+    let etag = upload_large_file(
+        Arc::clone(&client),
+        "my-bucket",
+        "large-file.bin",
+        bytes::Bytes::from(large_data),
+        Some(Box::new(|progress| {
+            println!(
+                "Part {}/{} — {:.1}% ({} / {} bytes)",
+                progress.current_part,
+                progress.total_parts,
+                progress.percentage(),
+                progress.bytes_uploaded,
+                progress.total_bytes,
+            );
+        })),
+    ).await?;
+
+    println!("Upload complete — ETag: {}", etag);
+    Ok(())
+}
+```
+
+### Manual `MultipartUpload`
+
+For fine-grained control (streaming sources, custom retry logic):
+
+```rust
+use fula_client::multipart::MultipartUpload;
+use std::sync::Arc;
+
+let upload = MultipartUpload::start(Arc::clone(&client), "bucket", "key").await?;
+// upload.upload_part(part_number, chunk_bytes).await?;
+// let etag = upload.complete().await?;
+// upload.abort().await?;  // on error
+```
+
+<Note>
+  Each part except the last must be at least 5 MB in most S3-compatible implementations. The default chunk size of 256 KB is deliberately small to respect IPFS block size limits; adjust `Config::multipart_chunk_size` for non-IPFS backends.
+</Note>
+
+---
+
+## Error handling
+
+```rust
+use fula_client::{ClientError, Result};
+
+match client.get_object("bucket", "key").await {
+    Ok(data) => { /* use data */ },
+    Err(ClientError::NotFound { bucket, key }) => {
+        eprintln!("Object not found: {bucket}/{key}");
+    },
+    Err(ClientError::S3Error { code, message, .. }) => {
+        eprintln!("S3 error {code}: {message}");
+    },
+    Err(ClientError::Encryption(e)) => {
+        eprintln!("Crypto failure: {e}");
+    },
+    Err(e) => {
+        eprintln!("Unexpected error: {e}");
+    }
+}
+```

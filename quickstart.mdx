@@ -1,80 +1,249 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Get started with Fula Storage"
+description: "Go from zero to your first upload in minutes. Configure credentials, create a bucket, and transfer files using AWS CLI, Python, JavaScript, or Rust."
 ---
 
-## Get started in three steps
+Fula Storage accepts any S3-compatible client. The only configuration change required is pointing your client at `https://s3.cloud.fx.land` and using your JWT token as the AWS access key ID with a `JWT:` prefix. The AWS secret key is not used and can be set to any non-empty string.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, you need:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- A JWT access token from `https://auth.fx.land`. See [Authentication](/authentication) for how to obtain one.
+- One of the following clients installed: AWS CLI, Python with `boto3`, Node.js with `@aws-sdk/client-s3`, or Rust with `fula-client`.
 
-### Step 2: Deploy your changes
+<Note>
+  Replace `your-jwt-token-here` in every example below with your actual JWT token.
+</Note>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Steps
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+<Steps>
+  <Step title="Configure your credentials">
+    Each S3 client needs to know your JWT token and the Fula gateway endpoint. Choose your client below.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    <Tabs>
+      <Tab title="AWS CLI">
+        Add a `[fula]` profile to your AWS credentials file at `~/.aws/credentials`:
 
-### Step 3: Go live
+        ```ini ~/.aws/credentials
+        [fula]
+        aws_access_key_id = JWT:your-jwt-token-here
+        aws_secret_access_key = not-used
+        ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+        Pass `--profile fula` and `--endpoint-url https://s3.cloud.fx.land` to every command.
+      </Tab>
+      <Tab title="Python (boto3)">
+        Create the client inline — no credentials file needed:
+
+        ```python
+        import boto3
+
+        jwt_token = "your-jwt-token-here"
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url="https://s3.cloud.fx.land",
+            aws_access_key_id=f"JWT:{jwt_token}",
+            aws_secret_access_key="not-used",
+            region_name="us-east-1",
+        )
+        ```
+      </Tab>
+      <Tab title="JavaScript (AWS SDK)">
+        Configure the `S3Client` with `forcePathStyle: true` to match the Fula gateway's URL format:
+
+        ```javascript
+        import { S3Client } from "@aws-sdk/client-s3";
+
+        const jwtToken = "your-jwt-token-here";
+
+        const s3 = new S3Client({
+          endpoint: "https://s3.cloud.fx.land",
+          region: "us-east-1",
+          forcePathStyle: true,
+          credentials: {
+            accessKeyId: `JWT:${jwtToken}`,
+            secretAccessKey: "not-used",
+          },
+        });
+        ```
+      </Tab>
+      <Tab title="Rust (fula-client)">
+        Build a `Config` with your token using the builder API:
+
+        ```rust
+        use fula_client::{FulaClient, Config};
+
+        let client = FulaClient::new(
+            Config::new("https://s3.cloud.fx.land")
+                .with_token("your-jwt-token-here"),
+        )?;
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Create a bucket">
+    Bucket names must be unique within your account.
+
+    <Tabs>
+      <Tab title="AWS CLI">
+        ```bash
+        aws s3 mb s3://my-bucket \
+          --endpoint-url https://s3.cloud.fx.land \
+          --profile fula
+        ```
+      </Tab>
+      <Tab title="Python (boto3)">
+        ```python
+        s3.create_bucket(Bucket="my-bucket")
+        ```
+      </Tab>
+      <Tab title="JavaScript (AWS SDK)">
+        ```javascript
+        import { CreateBucketCommand } from "@aws-sdk/client-s3";
+
+        await s3.send(new CreateBucketCommand({ Bucket: "my-bucket" }));
+        ```
+      </Tab>
+      <Tab title="Rust (fula-client)">
+        ```rust
+        client.create_bucket("my-bucket").await?;
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Upload a file">
+    <Tabs>
+      <Tab title="AWS CLI">
+        ```bash
+        aws s3 cp file.txt s3://my-bucket/ \
+          --endpoint-url https://s3.cloud.fx.land \
+          --profile fula
+        ```
+      </Tab>
+      <Tab title="Python (boto3)">
+        ```python
+        s3.put_object(Bucket="my-bucket", Key="hello.txt", Body=b"Hello World!")
+        ```
+      </Tab>
+      <Tab title="JavaScript (AWS SDK)">
+        ```javascript
+        import { PutObjectCommand } from "@aws-sdk/client-s3";
+
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: "my-bucket",
+            Key: "hello.txt",
+            Body: "Hello World!",
+          })
+        );
+        ```
+      </Tab>
+      <Tab title="Rust (fula-client)">
+        ```rust
+        client.put_object("my-bucket", "hello.txt", b"Hello, World!").await?;
+        ```
+      </Tab>
+    </Tabs>
+
+    <Warning>
+      Raw S3 tools (AWS CLI, boto3, AWS SDK) upload plaintext. Gateway operators can read uploaded content. For private data, use the [Encrypted Client SDK](/guides/encryption) to encrypt files before they leave your device.
+    </Warning>
+  </Step>
+
+  <Step title="Download a file">
+    <Tabs>
+      <Tab title="AWS CLI">
+        ```bash
+        aws s3 cp s3://my-bucket/file.txt ./downloaded.txt \
+          --endpoint-url https://s3.cloud.fx.land \
+          --profile fula
+        ```
+      </Tab>
+      <Tab title="Python (boto3)">
+        ```python
+        response = s3.get_object(Bucket="my-bucket", Key="hello.txt")
+        content = response["Body"].read()
+        print(content.decode())
+        ```
+      </Tab>
+      <Tab title="JavaScript (AWS SDK)">
+        ```javascript
+        import { GetObjectCommand } from "@aws-sdk/client-s3";
+
+        const response = await s3.send(
+          new GetObjectCommand({ Bucket: "my-bucket", Key: "hello.txt" })
+        );
+        const text = await response.Body.transformToString();
+        console.log(text);
+        ```
+      </Tab>
+      <Tab title="Rust (fula-client)">
+        ```rust
+        let data = client.get_object("my-bucket", "hello.txt").await?;
+        println!("{}", String::from_utf8_lossy(&data));
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="List objects">
+    <Tabs>
+      <Tab title="AWS CLI">
+        ```bash
+        aws s3 ls s3://my-bucket/ \
+          --endpoint-url https://s3.cloud.fx.land \
+          --profile fula
+        ```
+      </Tab>
+      <Tab title="Python (boto3)">
+        ```python
+        response = s3.list_objects_v2(Bucket="my-bucket")
+        for obj in response.get("Contents", []):
+            print(obj["Key"], obj["Size"])
+        ```
+      </Tab>
+      <Tab title="JavaScript (AWS SDK)">
+        ```javascript
+        import { ListObjectsV2Command } from "@aws-sdk/client-s3";
+
+        const response = await s3.send(
+          new ListObjectsV2Command({ Bucket: "my-bucket" })
+        );
+        for (const obj of response.Contents ?? []) {
+          console.log(obj.Key, obj.Size);
+        }
+        ```
+      </Tab>
+      <Tab title="Rust (fula-client)">
+        ```rust
+        let objects = client.list_objects("my-bucket").await?;
+        for obj in objects {
+            println!("{}", obj.key);
+        }
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Client-side encryption" icon="lock" href="/guides/encryption">
+    Use `EncryptedClient` to encrypt files and hide folder structure before uploading.
+  </Card>
+  <Card title="Large file uploads" icon="file-arrow-up" href="/guides/large-files">
+    Use multipart upload for files over 100 MB with progress callbacks and resume support.
+  </Card>
+  <Card title="Authentication" icon="key" href="/authentication">
+    Understand how JWT tokens embed in AWS Signature V4 and how to rotate credentials.
+  </Card>
+  <Card title="S3 API reference" icon="code" href="/api/buckets">
+    See every supported operation with full request and response details.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

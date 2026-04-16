@@ -1,0 +1,69 @@
+---
+title: "Security model and quantum-safe cryptography"
+description: "Fula uses client-side HPKE encryption with hybrid X25519 + ML-KEM-768 post-quantum keys. Storage nodes never see plaintext data or encryption keys."
+---
+
+Fula is designed around a zero-trust storage model: every node in the storage layer—IPFS nodes, pinning services, and even the gateway—is treated as untrusted by default. All sensitive data is encrypted on the client before it ever leaves the application, using Hybrid Public Key Encryption (HPKE) with a post-quantum key encapsulation mechanism. The gateway is trusted only for routing and rate-limiting; it never touches encryption keys or plaintext.
+
+## Trust model
+
+- **Storage nodes are untrusted.** IPFS nodes and pinning services receive only ciphertext. Even a fully compromised storage node gains nothing readable.
+- **Gateway is trusted for routing only.** The gateway validates your JWT and enforces rate limits. It does not hold, derive, or see encryption keys at any point.
+- **Keys never leave the client.** HPKE key encapsulation ensures the shared secret is established entirely between client endpoints. The server is not a participant in the key exchange.
+- **Per-user bucket isolation.** Each user's bucket namespace is automatically scoped by the gateway, preventing cross-user data access even when bucket names collide.
+
+## Cryptographic components
+
+| Component | Algorithm | Security level |
+|---|---|---|
+| Key encapsulation | X25519 + ML-KEM-768 | Hybrid classical + post-quantum |
+| Symmetric encryption | AES-256-GCM / ChaCha20-Poly1305 | 256-bit (quantum-resistant) |
+| Hashing | BLAKE3 | 256-bit (quantum-resistant) |
+| Integrity | Bao (BLAKE3-based) | Verified streaming |
+
+## Why hybrid key encapsulation
+
+Using both X25519 and ML-KEM-768 simultaneously provides defense in depth against two different classes of cryptographic failure:
+
+- If a sufficiently powerful quantum computer breaks X25519 via Shor's algorithm, ML-KEM-768 (NIST FIPS 203, formerly Kyber768) still protects the shared secret.
+- If ML-KEM-768 has an unforeseen weakness, X25519 still provides the full security of classical elliptic-curve Diffie–Hellman.
+
+Neither algorithm can undermine the other; both must be broken simultaneously for an attacker to succeed.
+
+## What is encrypted vs what is visible
+
+| Data | With `EncryptedClient` | With raw S3 tools |
+|---|---|---|
+| File content | Encrypted | Plaintext |
+| File names | Encrypted (FlatNamespace mode) | Plaintext |
+| Directory structure | Encrypted | Plaintext |
+| User IDs | Hashed | Visible |
+| Bucket names | Visible | Visible |
+| Approximate file sizes | Visible | Visible |
+| Request timestamps | Visible | Visible |
+
+<Note>
+Raw S3 tools (AWS CLI, boto3, AWS SDK) do **not** encrypt data. They upload plaintext that gateway operators can read. Use the `EncryptedClient` SDK for any private data.
+</Note>
+
+## Hybrid key encapsulation in Rust
+
+```rust
+use fula_crypto::{HybridKeyPair, hybrid_encapsulate, hybrid_decapsulate};
+
+// Generate quantum-safe keypair (X25519 + ML-KEM-768)
+let keypair = HybridKeyPair::generate();
+
+// Sender encapsulates shared secret
+let (encapsulated_key, shared_secret) = hybrid_encapsulate(keypair.public_key())?;
+
+// Recipient decapsulates
+let recovered = hybrid_decapsulate(&encapsulated_key, keypair.secret_key())?;
+assert_eq!(shared_secret, recovered);
+```
+
+The `HybridKeyPair` holds both an X25519 keypair and an ML-KEM-768 keypair. `hybrid_encapsulate` runs both KEMs in parallel and combines their shared secrets; `hybrid_decapsulate` reverses the process on the recipient side.
+
+<Warning>
+Lost encryption keys mean permanently lost data. There is no server-side recovery mechanism. Back up your secret keys using `EncryptionConfig` export before storing any data you cannot afford to lose.
+</Warning>

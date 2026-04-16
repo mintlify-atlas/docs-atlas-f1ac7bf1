@@ -1,0 +1,389 @@
+---
+title: "Object operations: upload, download, and delete"
+description: "S3 API endpoints for managing objects in Fula Storage: PutObject, GetObject, HeadObject, DeleteObject, DeleteObjects, CopyObject, and ListObjectsV2."
+---
+
+Fula Storage objects are content-addressed files stored on IPFS. Every uploaded object receives an IPFS CID as its ETag — a globally unique, verifiable fingerprint that doubles as a retrieval address. Objects are indexed in a Prolly Tree for O(log n) list performance. Client-side HPKE encryption is supported: keys never leave the client device, and the gateway sees only encrypted blocks. All object operations require a Bearer JWT.
+
+---
+
+## GET /{bucket}?list-type=2 — ListObjectsV2
+
+Lists objects in a bucket using Prolly Tree indexing. Supports prefix filtering, delimiter-based virtual directories, and cursor pagination. Returns up to 1,000 keys in under 200 ms.
+
+**Auth:** `storage:read` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket to list objects from.
+</ParamField>
+
+<ParamField query="list-type" type="number" required default="2">
+  Must be `2` to invoke the ListObjectsV2 behavior.
+</ParamField>
+
+<ParamField query="prefix" type="string">
+  Limit results to keys beginning with this prefix (e.g., `photos/2025/`).
+</ParamField>
+
+<ParamField query="delimiter" type="string">
+  Group keys by this character. Typically `/` to simulate directory hierarchies. Grouped prefixes appear in `CommonPrefixes`.
+</ParamField>
+
+<ParamField query="max-keys" type="number" default="1000">
+  Maximum number of keys to return. Range: 1–1000.
+</ParamField>
+
+<ParamField query="continuation-token" type="string">
+  Pagination cursor from the `NextContinuationToken` of a previous response.
+</ParamField>
+
+<ParamField query="start-after" type="string">
+  Return only keys that appear lexicographically after this value.
+</ParamField>
+
+<ParamField query="fetch-owner" type="boolean" default="false">
+  Include owner information in each `Contents` entry.
+</ParamField>
+
+<ParamField query="encoding-type" type="string">
+  Set to `url` to URL-encode keys in the response.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Object listing returned as `ListBucketResult` XML |
+| `404` | `NoSuchBucket` — bucket does not exist |
+
+### Example
+
+```bash curl
+curl --request GET \
+  --url 'https://gateway.fx.land/my-bucket?list-type=2&prefix=photos/&delimiter=/' \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+## PUT /{bucket}/{key} — PutObject
+
+Uploads an object into the specified bucket. Single-PUT is limited to 5 GB; use [multipart upload](/api/multipart) for larger files. Files larger than 768 KB are automatically split into 768 KB chunks by the client; the `x-fula-chunked: true` header signals that the uploaded body is a chunk manifest rather than raw data.
+
+The returned `ETag` is the IPFS CID of the object, which you can use to fetch the content directly from any IPFS gateway.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Destination bucket name.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Destination object key (path within the bucket).
+</ParamField>
+
+<ParamField header="Content-Length" type="number" required>
+  Size of the object body in bytes.
+</ParamField>
+
+<ParamField header="Content-Type" type="string">
+  MIME type of the object (e.g., `image/jpeg`).
+</ParamField>
+
+<ParamField header="Content-MD5" type="string">
+  Base64-encoded MD5 digest for integrity verification.
+</ParamField>
+
+<ParamField header="x-fula-encrypted" type="string">
+  Set to `true` when the object is client-side encrypted. Instructs the gateway to treat the body as opaque encrypted bytes.
+</ParamField>
+
+<ParamField header="x-fula-encryption" type="string">
+  JSON object containing encryption metadata. Fields:
+  - `version` — encryption format version (currently `2`)
+  - `algorithm` — `"AES-256-GCM"`
+  - `nonce` — base64-encoded nonce
+  - `wrapped_key` — HPKE-wrapped Data Encryption Key
+  - `metadata_privacy` — `true` if filename/metadata are also encrypted
+  - `obfuscation_mode` — `"flat"`, `"hash"`, `"uuid"`, or `"structure"`
+  - `private_metadata` — encrypted original filename, size, and content-type
+</ParamField>
+
+<ParamField header="x-fula-chunked" type="string">
+  Set to `true` when the body is a chunked-file manifest (for files >768 KB). The manifest contains chunk CIDs and metadata needed for client-side reassembly.
+</ParamField>
+
+<ParamField header="x-fula-forest" type="string">
+  Set to `true` when the object is a PrivateForest index — an encrypted directory tree used in FlatNamespace mode to map paths to storage keys.
+</ParamField>
+
+<ParamField header="x-pinning-service" type="string">
+  Your IPFS Pinning Service endpoint URL. Per-request credential — never stored by the gateway. Also accepted as `x-amz-meta-x-pinning-service` for S3 client library compatibility. Examples: `https://api.pinata.cloud/psa`, `https://api.web3.storage`.
+</ParamField>
+
+<ParamField header="x-pinning-token" type="string">
+  Bearer token for your IPFS Pinning Service. Your own credential — never stored by the gateway. Also accepted as `x-amz-meta-x-pinning-token`.
+</ParamField>
+
+<ParamField header="x-amz-meta-*" type="string">
+  Arbitrary user-defined metadata. Each header must be prefixed with `x-amz-meta-` (e.g., `x-amz-meta-author: Jane`). Returned on GetObject and HeadObject responses.
+</ParamField>
+
+<ParamField header="x-amz-meta-hpke-enc" type="string">
+  HPKE-encapsulated key (base64). Contains the wrapped Data Encryption Key used by HPKE client-side encryption.
+</ParamField>
+
+<ParamField header="x-amz-storage-class" type="string" default="STANDARD">
+  Storage class: `STANDARD`, `REDUCED_REDUNDANCY`, or `GLACIER`.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Object uploaded. `ETag` response header contains the IPFS CID |
+| `400` | `EntityTooLarge` — body exceeds 5 GB single-PUT limit |
+| `507` | `InsufficientStorage` — user quota exceeded |
+
+### Example
+
+```bash curl
+curl --request PUT \
+  --url https://gateway.fx.land/my-bucket/photos/beach.jpg \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: image/jpeg' \
+  --header 'x-fula-encrypted: true' \
+  --header 'x-pinning-service: https://api.pinata.cloud/psa' \
+  --header 'x-pinning-token: <pinning-token>' \
+  --data-binary @beach.jpg
+```
+
+---
+
+## GET /{bucket}/{key} — GetObject
+
+Downloads an object. Supports byte-range requests for partial retrieval and video streaming. Download integrity is verified using BLAKE3/Bao. Encryption headers (`x-fula-encryption`, `x-amz-meta-hpke-enc`) are returned alongside the body so the client can decrypt locally.
+
+**Auth:** `storage:read` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket containing the object.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Object key to retrieve.
+</ParamField>
+
+<ParamField header="Range" type="string">
+  Byte range to retrieve (e.g., `bytes=0-1048575`). Returns a `206 Partial Content` response with a `Content-Range` header.
+</ParamField>
+
+<ParamField header="If-Modified-Since" type="string">
+  Returns the object only if it was modified after this date. Returns `304` otherwise.
+</ParamField>
+
+<ParamField header="If-None-Match" type="string">
+  Returns the object only if its ETag differs from this value. Returns `304` otherwise.
+</ParamField>
+
+<ParamField query="versionId" type="string">
+  Retrieve a specific version of the object (when versioning is enabled).
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Full object body |
+| `206` | Partial content (range request honoured) |
+| `304` | Not modified (conditional request) |
+| `404` | `NoSuchKey` — object does not exist |
+| `416` | Requested Range Not Satisfiable |
+
+### Example
+
+```bash curl
+# Full download
+curl --request GET \
+  --url https://gateway.fx.land/my-bucket/photos/beach.jpg \
+  --header 'Authorization: Bearer <token>' \
+  --output beach.jpg
+
+# Partial download (first 1 MB)
+curl --request GET \
+  --url https://gateway.fx.land/my-bucket/videos/clip.mp4 \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Range: bytes=0-1048575' \
+  --output clip_part1.mp4
+```
+
+---
+
+## HEAD /{bucket}/{key} — HeadObject
+
+Returns object metadata without downloading the body. Useful for checking existence, size, content type, and encryption headers before deciding whether to fetch the full object.
+
+**Auth:** `storage:read` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket containing the object.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Object key to inspect.
+</ParamField>
+
+<ParamField query="versionId" type="string">
+  Inspect a specific version (when versioning is enabled).
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Metadata returned in response headers |
+| `404` | `NoSuchKey` — object does not exist |
+
+### Example
+
+```bash curl
+curl --request HEAD \
+  --url https://gateway.fx.land/my-bucket/photos/beach.jpg \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+## DELETE /{bucket}/{key} — DeleteObject
+
+Removes an object from the bucket. The key is deleted from the Prolly Tree index immediately; associated IPFS blocks are unpinned and garbage-collected asynchronously.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket containing the object.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Object key to delete.
+</ParamField>
+
+<ParamField query="versionId" type="string">
+  Delete a specific version (when versioning is enabled).
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `204` | Object deleted successfully |
+| `404` | `NoSuchKey` — object does not exist |
+
+### Example
+
+```bash curl
+curl --request DELETE \
+  --url https://gateway.fx.land/my-bucket/photos/beach.jpg \
+  --header 'Authorization: Bearer <token>'
+```
+
+---
+
+## POST /{bucket}?delete — DeleteObjects
+
+Deletes up to 1,000 objects in a single request. Pass an XML body listing the keys to remove. Set `<Quiet>true</Quiet>` to suppress success entries in the response and return only errors.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket from which to delete objects.
+</ParamField>
+
+### Request body fields
+
+<ResponseField name="Delete.Quiet" type="boolean">
+  When `true`, the response lists only errors, not successful deletions.
+</ResponseField>
+
+<ResponseField name="Delete.Object[].Key" type="string">
+  Key of an object to delete.
+</ResponseField>
+
+<ResponseField name="Delete.Object[].VersionId" type="string">
+  Optional version ID to target a specific version.
+</ResponseField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Batch operation completed. Response lists deleted keys and any errors |
+
+### Example
+
+```bash curl
+curl --request POST \
+  --url 'https://gateway.fx.land/my-bucket?delete' \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/xml' \
+  --data '<?xml version="1.0" encoding="UTF-8"?>
+<Delete>
+  <Quiet>false</Quiet>
+  <Object><Key>sample1.txt</Key></Object>
+  <Object><Key>sample2.txt</Key></Object>
+</Delete>'
+```
+
+---
+
+## PUT /{bucket}/{destKey} — CopyObject
+
+Creates a copy of an existing object under a new key. Because Fula Storage is content-addressed, a copy creates a new index entry pointing to the same IPFS CID — no data is duplicated on the network. Metadata can be inherited from the source or replaced via `x-amz-metadata-directive`.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Destination bucket.
+</ParamField>
+
+<ParamField path="destKey" type="string" required>
+  Destination object key.
+</ParamField>
+
+<ParamField header="x-amz-copy-source" type="string" required>
+  Source object in the format `/{sourceBucket}/{sourceKey}` (e.g., `/source-bucket/original.txt`).
+</ParamField>
+
+<ParamField header="x-amz-metadata-directive" type="string" default="COPY">
+  `COPY` to inherit metadata from the source, or `REPLACE` to use new metadata provided in the request.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Object copied. Response body contains `CopyObjectResult` XML with `ETag` and `LastModified` |
+| `404` | `NoSuchKey` — source object does not exist |
+
+### Example
+
+```bash curl
+curl --request PUT \
+  --url https://gateway.fx.land/my-bucket/photos/beach-copy.jpg \
+  --header 'Authorization: Bearer <token>' \
+  --header 'x-amz-copy-source: /my-bucket/photos/beach.jpg'
+```

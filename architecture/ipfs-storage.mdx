@@ -1,0 +1,78 @@
+---
+title: "IPFS-backed storage: pinning and content addressing"
+description: "Fula persists data on IPFS with content-addressed CIDs, Prolly Tree O(log n) indexing, and CRDT metadata for conflict-free distributed updates."
+---
+
+Every object stored through Fula is content-addressed: the storage system identifies data by a cryptographic hash of its contents—a Content Identifier (CID)—rather than by a mutable location like a file path or URL. This means the ETag returned for any `PutObject` or `GetObject` call is an IPFS CID, not the MD5 hash that AWS S3 uses. Identical content always produces the same CID, making deduplication automatic at the block level across the entire network.
+
+## Content addressing
+
+When you upload an object, `fula-blockstore` writes the data as one or more IPFS blocks, each identified by its CID. The CID is then returned to the S3 layer as the object's ETag. Retrieving that object later resolves the CID back to the same bytes—the storage layer cannot silently corrupt or substitute content because any change would produce a different CID, and Bao integrity verification would catch the mismatch.
+
+<Note>
+The `ETag` in Fula responses is an IPFS CID (e.g., `bafybeig...`), not an MD5 hash. Any client code that parses the ETag as a hex MD5 string will need to be updated to treat it as an opaque identifier.
+</Note>
+
+## IPFS Cluster: distributed pinning
+
+Pinning tells IPFS nodes to retain a CID indefinitely rather than garbage-collecting it. Fula uses IPFS Cluster to orchestrate pinning across multiple nodes with a configurable replication factor.
+
+The default replication settings from `.env.example` are:
+
+| Setting | Default value | Description |
+|---|---|---|
+| `REPLICATION_FACTOR_MIN` | `2` | Minimum number of nodes that must pin each CID |
+| `REPLICATION_FACTOR_MAX` | `3` | Maximum number of nodes that will pin each CID |
+
+If a node goes offline, IPFS Cluster automatically re-pins affected CIDs on other nodes to maintain the minimum replication factor.
+
+## Prolly Trees: O(log n) bucket indexing
+
+`fula-core` stores bucket object listings in a **Prolly Tree** (probabilistic B-tree)—a persistent, content-addressed tree structure where node boundaries are determined probabilistically by content hashes. This gives:
+
+- **O(log n) lookup** for individual objects, even in buckets with millions of keys.
+- **Efficient `ListObjectsV2` pagination** by walking the tree from a given continuation token.
+- **Structural sharing**: tree nodes that have not changed between versions share CIDs, minimising the data written on each update.
+
+## CRDTs: conflict-free metadata sync
+
+Bucket metadata is stored as a **CRDT** (conflict-free replicated data type). When multiple nodes update metadata concurrently—for example, two clients writing to the same bucket over different gateway replicas—CRDT merge rules guarantee that all nodes eventually converge to the same state without coordination locks or a single authoritative master. No write is lost; conflicts are resolved deterministically by the merge function.
+
+## Chunking: large file support
+
+IPFS enforces a practical block size limit of 1 MB. Files larger than **768 KB** are automatically split into chunks by `fula-blockstore` to stay safely under that limit:
+
+- Each chunk is stored as an independent IPFS block with its own CID.
+- A **manifest object** is stored under the key `<object-key>` with the custom metadata header `x-fula-chunked`, listing the ordered sequence of chunk CIDs.
+- Partial reads (`GetObject` with a `Range` header) resolve only the chunks that overlap the requested byte range, avoiding full-file downloads.
+- Failed uploads can resume from the last successfully stored chunk.
+
+## Supported pinning services
+
+Fula forwards the user's JWT from the S3 authentication layer directly to the configured pinning service. No separate token configuration is required.
+
+| Service | Endpoint |
+|---|---|
+| Pinata | `https://api.pinata.cloud/psa` |
+| Web3.Storage | `https://api.web3.storage` |
+| NFT.Storage | `https://nft.storage/api` |
+| Infura | `https://ipfs.infura.io:5001` |
+
+You can also override the service per-request by setting `X-Pinning-Service` and `X-Pinning-Token` headers on the S3 request.
+
+## Data lifecycle
+
+<Steps>
+  <Step title="PUT object">
+    The gateway receives the S3 `PutObject` request. If encryption is enabled, the client encrypts the data before it is transmitted.
+  </Step>
+  <Step title="Pin to IPFS Cluster">
+    `fula-blockstore` writes the data as IPFS blocks, obtains the root CID, and pins it to IPFS Cluster across the configured replication factor (min: 2, max: 3 by default).
+  </Step>
+  <Step title="Update Prolly Tree index">
+    `fula-core` inserts the new object key and its CID into the bucket's Prolly Tree index and updates CRDT metadata, propagating the change to other nodes.
+  </Step>
+  <Step title="DELETE object">
+    A `DeleteObject` request marks the object as removed in the Prolly Tree. The corresponding CID is unpinned from IPFS Cluster **asynchronously**—the S3 response returns immediately, and garbage collection runs in the background.
+  </Step>
+</Steps>

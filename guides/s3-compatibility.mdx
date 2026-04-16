@@ -1,0 +1,240 @@
+---
+title: "S3 API compatibility, supported operations, and migration"
+description: "Fula is a drop-in S3 replacement. Change the endpoint URL and credential format — your existing AWS CLI, boto3, or JavaScript SDK code works unchanged."
+---
+
+Fula implements the AWS S3 REST API with AWS Signature V4 authentication. Any S3-compatible tool or SDK works without code changes — the only differences are the endpoint URL and how you supply credentials. ETags are IPFS CIDs rather than MD5 hashes, which means content-addressed deduplication is built-in and ETags remain stable across re-uploads of identical content.
+
+## Supported operations
+
+All 16 core S3 operations are supported:
+
+| Operation | Status |
+|---|---|
+| `CreateBucket` | Supported |
+| `DeleteBucket` | Supported |
+| `ListBuckets` | Supported |
+| `HeadBucket` | Supported |
+| `PutObject` | Supported |
+| `GetObject` | Supported |
+| `DeleteObject` | Supported |
+| `HeadObject` | Supported |
+| `CopyObject` | Supported |
+| `ListObjectsV2` | Supported |
+| `CreateMultipartUpload` | Supported |
+| `UploadPart` | Supported |
+| `CompleteMultipartUpload` | Supported |
+| `AbortMultipartUpload` | Supported |
+| `ListParts` | Supported |
+| `ListMultipartUploads` | Supported |
+
+## Endpoint and credentials
+
+The production endpoint is `https://s3.cloud.fx.land`. For local development with Docker Compose, use `http://localhost:9000`.
+
+Fula uses AWS Signature V4, but credentials carry your JWT token rather than AWS access keys. Embed the token in the access key ID with a `JWT:` prefix. The secret access key value is not validated — use any non-empty string such as `not-used`.
+
+<CardGroup cols={2}>
+  <Card title="Production" icon="globe">
+    `https://s3.cloud.fx.land` — TLS required. Supply your JWT token in the `JWT:` access key format.
+  </Card>
+  <Card title="Local development" icon="laptop-code">
+    `http://localhost:9000` — no TLS. Run with `--no-auth` to skip token validation during development.
+  </Card>
+</CardGroup>
+
+### Credential format
+
+<ParamField path="aws_access_key_id" type="string" required>
+  Your JWT token prefixed with `JWT:`. Example: `JWT:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...`
+</ParamField>
+<ParamField path="aws_secret_access_key" type="string" required default="not-used">
+  Not validated. Set to any non-empty string — `not-used` is conventional.
+</ParamField>
+<ParamField path="region" type="string" default="us-east-1">
+  Not used for routing, but required by most S3 client libraries. Set to any valid region string.
+</ParamField>
+
+<CodeGroup>
+
+```ini AWS credentials file
+[fula]
+aws_access_key_id = JWT:your-jwt-token-here
+aws_secret_access_key = not-used
+```
+
+```bash Environment variables
+export AWS_ACCESS_KEY_ID="JWT:your-jwt-token-here"
+export AWS_SECRET_ACCESS_KEY="not-used"
+export AWS_ENDPOINT_URL="https://s3.cloud.fx.land"
+```
+
+</CodeGroup>
+
+<Tip>
+  Set `AWS_ENDPOINT_URL` as an environment variable to avoid passing `--endpoint-url` to every AWS CLI command. All `aws s3` and `aws s3api` subcommands respect this variable.
+</Tip>
+
+## Known differences from AWS S3
+
+<AccordionGroup>
+  <Accordion title="ETags are IPFS CIDs, not MD5 hashes">
+    AWS S3 returns MD5-based ETags for single-part objects. Fula returns the IPFS CID of the uploaded content. ETags are still valid strings that satisfy the S3 protocol — conditional requests (`If-Match`, `If-None-Match`) work correctly. The practical benefit is that identical content always has the same ETag regardless of which bucket or account it is stored in.
+  </Accordion>
+  <Accordion title="Per-user bucket namespacing">
+    Multiple users can create buckets with the same name without conflict. Fula namespaces buckets internally by user identity, so `alice/photos` and `bob/photos` are distinct even though both users call their bucket `photos`. This is transparent to S3 clients — you use your bucket names as normal.
+  </Accordion>
+  <Accordion title="No ACLs or bucket policies">
+    Fula does not implement S3 ACLs, bucket policies, or IAM. Access is controlled exclusively by the JWT token. Requests signed with a valid token can access that user's buckets; all other requests are rejected.
+  </Accordion>
+  <Accordion title="Storage class values are accepted but ignored">
+    Fula accepts `STANDARD`, `REDUCED_REDUNDANCY`, and `GLACIER` storage class values in `PutObject` requests without returning an error. All objects are stored on IPFS regardless of the requested class.
+  </Accordion>
+</AccordionGroup>
+
+## Migrating from AWS S3
+
+To migrate an existing application, change the endpoint URL and update credentials. No other code changes are required.
+
+<Steps>
+  <Step title="Obtain a JWT token">
+    Sign in at `https://auth.fx.land` to obtain a JWT access token. See [Authentication](/authentication) for the full flow.
+  </Step>
+  <Step title="Update the endpoint URL">
+    Replace your existing `s3.amazonaws.com` endpoint with `https://s3.cloud.fx.land` in your client configuration.
+  </Step>
+  <Step title="Update credentials">
+    Set `aws_access_key_id` to `JWT:<your-token>` and `aws_secret_access_key` to `not-used`. Remove any AWS region-based IAM credentials.
+  </Step>
+  <Step title="Add forcePathStyle (JavaScript only)">
+    If using the JavaScript AWS SDK, add `forcePathStyle: true` to the `S3Client` constructor. This is not required for the AWS CLI, boto3, or the Rust SDK.
+  </Step>
+</Steps>
+
+<Tabs>
+  <Tab title="AWS CLI">
+    Add a `[fula]` profile to your credentials file and pass `--profile fula --endpoint-url https://s3.cloud.fx.land` to every command. Alternatively, export `AWS_ENDPOINT_URL` to avoid repeating the flag.
+
+    ```bash
+    # ~/.aws/credentials
+    cat >> ~/.aws/credentials << 'EOF'
+    [fula]
+    aws_access_key_id = JWT:your-jwt-token-here
+    aws_secret_access_key = not-used
+    EOF
+
+    # Create a bucket
+    aws s3 mb s3://my-bucket \
+      --endpoint-url https://s3.cloud.fx.land \
+      --profile fula
+
+    # Upload a file
+    aws s3 cp file.txt s3://my-bucket/ \
+      --endpoint-url https://s3.cloud.fx.land \
+      --profile fula
+
+    # List objects
+    aws s3 ls s3://my-bucket/ \
+      --endpoint-url https://s3.cloud.fx.land \
+      --profile fula
+
+    # Sync a local directory
+    aws s3 sync ./local-dir s3://my-bucket/backup/ \
+      --endpoint-url https://s3.cloud.fx.land \
+      --profile fula
+    ```
+  </Tab>
+  <Tab title="Python (boto3)">
+    Change `endpoint_url` and set `aws_access_key_id` to your `JWT:`-prefixed token. Everything else stays the same.
+
+    ```python
+    import boto3
+
+    jwt_token = "your-jwt-token-here"
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url="https://s3.cloud.fx.land",
+        aws_access_key_id=f"JWT:{jwt_token}",
+        aws_secret_access_key="not-used",
+        region_name="us-east-1",
+    )
+
+    # Use the S3 API normally
+    s3.create_bucket(Bucket="my-bucket")
+    s3.put_object(Bucket="my-bucket", Key="hello.txt", Body=b"Hello World!")
+    response = s3.get_object(Bucket="my-bucket", Key="hello.txt")
+    print(response["Body"].read().decode())
+    ```
+  </Tab>
+  <Tab title="JavaScript (AWS SDK)">
+    Set `endpoint` to the Fula gateway URL and add `forcePathStyle: true`. The `forcePathStyle` option is required because Fula uses path-style URLs (`/bucket/key`) rather than virtual-hosted-style (`bucket.host/key`).
+
+    ```javascript
+    import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+    const jwtToken = "your-jwt-token-here";
+
+    const s3 = new S3Client({
+      endpoint: "https://s3.cloud.fx.land",
+      region: "us-east-1",
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: `JWT:${jwtToken}`,
+        secretAccessKey: "not-used",
+      },
+    });
+
+    await s3.send(new PutObjectCommand({
+      Bucket: "my-bucket",
+      Key: "hello.txt",
+      Body: "Hello World!",
+    }));
+    ```
+
+    <Warning>
+      `forcePathStyle: true` is required. Without it the AWS SDK constructs virtual-hosted URLs (`my-bucket.s3.cloud.fx.land`) that the Fula gateway does not serve.
+    </Warning>
+  </Tab>
+  <Tab title="MinIO client (mc)">
+    Register a Fula alias in the MinIO client and use it with any `mc` command.
+
+    ```bash
+    # Register alias
+    mc alias set fula https://s3.cloud.fx.land \
+      "JWT:your-jwt-token-here" \
+      "not-used"
+
+    # Create bucket
+    mc mb fula/my-bucket
+
+    # Upload file
+    mc cp file.txt fula/my-bucket/
+
+    # Download file
+    mc cp fula/my-bucket/file.txt .
+
+    # Mirror a local directory
+    mc mirror ./local-dir fula/my-bucket/backup/
+    ```
+  </Tab>
+</Tabs>
+
+## Local development with Docker Compose
+
+For local development, start the gateway with Docker Compose and point clients at `http://localhost:9000`. No TLS configuration or JWT token is required when running with `--no-auth`.
+
+```bash
+git clone https://github.com/functionland/fula-api
+cd fula-api
+docker-compose up -d
+```
+
+```bash
+# Verify the gateway is running
+aws s3 ls --endpoint-url http://localhost:9000 --no-sign-request
+```
+
+<Note>
+  Raw S3 clients — AWS CLI, boto3, and the JavaScript AWS SDK — upload plaintext. If you need to store private data, use the [Encrypted Client SDK](/guides/encryption) to encrypt files before upload. The `EncryptedClient` is fully compatible with the S3-compatible endpoint.
+</Note>

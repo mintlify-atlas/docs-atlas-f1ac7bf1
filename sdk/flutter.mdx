@@ -1,0 +1,231 @@
+---
+title: "Flutter SDK for Fula Storage (Android, iOS, Web)"
+description: "Use the fula_client Flutter plugin to store and retrieve encrypted files on Android, iOS, Web, and Windows using native Rust via flutter_rust_bridge FFI."
+---
+
+The `fula_client` Flutter plugin brings Fula's full Rust SDK — including client-side encryption, FlatNamespace metadata privacy, and secure sharing — to Android, iOS, Web (WASM), and Windows. The Dart API wraps the native Rust code via `flutter_rust_bridge`, so all cryptographic operations run locally on the device.
+
+## Installation
+
+Add the package to your `pubspec.yaml`:
+
+```yaml pubspec.yaml
+dependencies:
+  fula_client: ^0.2.26
+```
+
+Or install with the CLI:
+
+```bash
+flutter pub add fula_client
+```
+
+### Platform setup
+
+<Tabs>
+  <Tab title="Android">
+    Add to `android/app/build.gradle` to include the required ABI filters:
+
+    ```gradle android/app/build.gradle
+    android {
+        defaultConfig {
+            ndk {
+                abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+            }
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Web">
+    Ensure your web server serves WASM files with the correct MIME type:
+
+    ```
+    application/wasm
+    ```
+
+    No additional code changes are needed — the plugin automatically uses the WASM build on web.
+  </Tab>
+  <Tab title="iOS / Windows">
+    No additional setup is required. The plugin uses FFI (`ffiPlugin: true`) and the native library is bundled automatically.
+  </Tab>
+</Tabs>
+
+## Quick start
+
+```dart
+import 'package:fula_client/fula_client.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+
+Future<void> main() async {
+  final config = FulaConfig(
+    endpoint: 'https://s3.cloud.fx.land',
+    accessToken: 'your-jwt-token',
+  );
+
+  // FlatNamespace is recommended for maximum privacy
+  final encConfig = EncryptionConfig(
+    enableMetadataPrivacy: true,
+    obfuscationMode: ObfuscationMode.flatNamespace,
+  );
+
+  final client = await createEncryptedClient(config, encConfig);
+
+  // Upload encrypted file
+  final data = utf8.encode('Secret document content');
+  await putFlat(
+    client,
+    'my-bucket',
+    '/documents/secret.txt',
+    Uint8List.fromList(data),
+    'text/plain',
+  );
+
+  // Download and decrypt
+  final decrypted = await getFlat(client, 'my-bucket', '/documents/secret.txt');
+  print('Content: ${utf8.decode(decrypted)}');
+
+  // List files (shows original names, not obfuscated storage keys)
+  final files = await listDecrypted(client, 'my-bucket', ListOptions());
+  for (final file in files) {
+    print('${file.originalKey} - ${file.size} bytes');
+  }
+}
+```
+
+## Client creation
+
+<ParamField path="createClient(config)" type="Future<FulaClient>">
+  Creates a basic unencrypted client that speaks the raw S3 API.
+</ParamField>
+
+<ParamField path="createEncryptedClient(config, encConfig)" type="Future<EncryptedFulaClient>">
+  Creates a client with client-side HPKE encryption. All data is encrypted before leaving the device.
+</ParamField>
+
+**`FulaConfig` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `endpoint` | `String` | Gateway URL (e.g. `https://s3.cloud.fx.land`) |
+| `accessToken` | `String` | JWT Bearer token |
+
+**`EncryptionConfig` fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enableMetadataPrivacy` | `bool` | `true` | Encrypt file names and metadata |
+| `obfuscationMode` | `ObfuscationMode` | `flatNamespace` | How storage keys are obfuscated |
+
+## Obfuscation modes
+
+| Mode | Server sees | Privacy | Use case |
+|------|-------------|---------|----------|
+| `flatNamespace` | `QmX7a8f3e2d1c9b4...` | Highest | Default — recommended |
+| `deterministic` | `e/a7c3f9b2e8d14a6f` | Medium | Server-side deduplication |
+| `random` | `e/random-uuid-here` | High | Max privacy, no dedup |
+| `preserveStructure` | `/photos/vacation/e_a7c3` | Low | Visible folder organization |
+
+```dart
+// FlatNamespace (recommended) — complete structure hiding
+final encConfig = EncryptionConfig(
+  obfuscationMode: ObfuscationMode.flatNamespace,
+);
+
+// PreserveStructure — keep folder paths, hash filenames only
+final encConfig = EncryptionConfig(
+  obfuscationMode: ObfuscationMode.preserveStructure,
+);
+```
+
+## Bucket operations
+
+```dart
+// Create a bucket
+await createBucket(client, 'my-bucket');
+
+// List all buckets
+final buckets = await listBuckets(client);
+
+// Delete a bucket
+await deleteBucket(client, 'my-bucket');
+```
+
+## Object operations
+
+<Tabs>
+  <Tab title="Encrypted (FlatNamespace)">
+    ```dart
+    // Upload by path (recommended — encrypted, structure hidden)
+    await putFlat(client, 'bucket', '/photos/beach.jpg', imageBytes, 'image/jpeg');
+
+    // Download by path
+    final bytes = await getFlat(client, 'bucket', '/photos/beach.jpg');
+
+    // Delete by path
+    await deleteFlat(client, 'bucket', '/photos/beach.jpg');
+
+    // List directory
+    final entries = await listDirectory(client, 'bucket', '/photos/');
+    ```
+  </Tab>
+  <Tab title="Encrypted (generic)">
+    ```dart
+    // Upload with encryption (any key format)
+    await putEncrypted(client, 'bucket', 'my-key', data);
+
+    // Download and decrypt
+    final decrypted = await getDecrypted(client, 'bucket', 'my-key');
+
+    // List with decrypted metadata
+    final files = await listDecrypted(client, 'bucket', ListOptions());
+    ```
+  </Tab>
+  <Tab title="Unencrypted">
+    ```dart
+    // Upload object (plaintext — not recommended for private data)
+    await putObject(client, 'bucket', 'key', data);
+
+    // Download object
+    final bytes = await getObject(client, 'bucket', 'key');
+
+    // List objects
+    final objects = await listObjects(client, 'bucket', ListOptions());
+    ```
+  </Tab>
+</Tabs>
+
+## Key management
+
+<Warning>
+  Export and securely back up your encryption key. If the key is lost, encrypted data cannot be recovered.
+</Warning>
+
+```dart
+// Export the secret key for backup
+final keyBytes = await exportSecretKey(client);
+// Store keyBytes securely (e.g., in a keychain or secure enclave)
+
+// Restore a client from a previously exported key
+final restoredConfig = EncryptionConfig.fromKey(keyBytes);
+final restoredClient = await createEncryptedClient(config, restoredConfig);
+```
+
+## Secure sharing
+
+```dart
+// Create a share token for a file (read-only, expires in 24h)
+final token = await createShareToken(
+  client,
+  'bucket',
+  '/documents/report.pdf',
+  ShareMode.readOnly,
+  expiry: Duration(hours: 24),
+);
+
+// On the recipient's device: accept the share
+final share = await acceptShare(token);
+
+// Access the shared file
+final data = await getWithShare(client, 'bucket', '/documents/report.pdf', share);
+```

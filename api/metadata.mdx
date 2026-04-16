@@ -1,0 +1,203 @@
+---
+title: "Object tagging and metadata operations"
+description: "Add, retrieve, and remove S3 tags on objects in Fula Storage. Use x-amz-meta-* headers on PutObject to attach custom metadata at upload time."
+---
+
+Fula Storage supports two complementary mechanisms for attaching information to objects: **user metadata** and **object tags**. User metadata is set at upload time via `x-amz-meta-*` request headers and is immutable without re-uploading the object. Tags can be added, replaced, and removed at any time via dedicated tagging endpoints. Both mechanisms are returned as response headers on `GetObject` and `HeadObject` calls, so clients can inspect them without reading the full object body. All endpoints require a Bearer JWT.
+
+<Note>
+  Metadata set via `x-amz-meta-*` headers on PutObject is returned as response headers on GetObject and HeadObject — there is no separate "get metadata" endpoint. Tags, by contrast, are managed through the dedicated `?tagging` endpoints below.
+</Note>
+
+---
+
+## User metadata via x-amz-meta-* headers
+
+Attach arbitrary key-value metadata to an object at upload time by including one or more `x-amz-meta-<name>` headers in a PutObject or CreateMultipartUpload request. The gateway stores these headers alongside the object and echoes them back on every GetObject and HeadObject response.
+
+<ParamField header="x-amz-meta-*" type="string">
+  Custom metadata field. Replace `*` with your chosen key (e.g., `x-amz-meta-author`, `x-amz-meta-project`). Values are plain strings. Multiple headers are permitted.
+</ParamField>
+
+```bash curl
+curl --request PUT \
+  --url https://gateway.fx.land/my-bucket/report.pdf \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/pdf' \
+  --header 'x-amz-meta-author: Jane Smith' \
+  --header 'x-amz-meta-project: Research-2025' \
+  --data-binary @report.pdf
+```
+
+---
+
+## Encryption metadata headers
+
+Fula Storage uses HPKE (Hybrid Public Key Encryption) for client-side encryption. The following headers carry encryption state alongside the object.
+
+<ParamField header="x-amz-meta-hpke-enc" type="string">
+  HPKE-encapsulated key in base64 encoding. Contains the wrapped Data Encryption Key (DEK) used to encrypt the object body. Returned on GetObject/HeadObject so the client can decrypt locally.
+</ParamField>
+
+<ParamField header="x-fula-encryption" type="string">
+  JSON object with full encryption metadata. Fields:
+  - `version` — encryption format version (currently `2`)
+  - `algorithm` — `"AES-256-GCM"`
+  - `nonce` — base64-encoded nonce
+  - `wrapped_key` — HPKE-wrapped DEK
+  - `metadata_privacy` — `true` if the filename and content-type are also encrypted
+  - `obfuscation_mode` — `"flat"` (FlatNamespace), `"hash"`, `"uuid"`, or `"structure"`
+  - `private_metadata` — encrypted payload containing the original filename, file size, and content-type
+</ParamField>
+
+```bash curl
+curl --request PUT \
+  --url https://gateway.fx.land/my-bucket/secret.bin \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/octet-stream' \
+  --header 'x-fula-encrypted: true' \
+  --header 'x-amz-meta-hpke-enc: <base64-wrapped-key>' \
+  --header 'x-fula-encryption: {"version":2,"algorithm":"AES-256-GCM","nonce":"<base64>","wrapped_key":"<base64>","metadata_privacy":true,"obfuscation_mode":"flat","private_metadata":"<encrypted>"}' \
+  --data-binary @secret.bin
+```
+
+---
+
+## GET /{bucket}/{key}?tagging — GetObjectTagging
+
+Returns the complete tag set for the specified object as XML.
+
+**Auth:** `storage:read` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket containing the object.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Object key whose tags you want to retrieve.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Tag set returned as `Tagging` XML |
+| `404` | `NoSuchKey` — object does not exist |
+
+### Example
+
+```bash curl
+curl --request GET \
+  --url 'https://gateway.fx.land/my-bucket/report.pdf?tagging' \
+  --header 'Authorization: Bearer <token>'
+```
+
+**Response body:**
+
+```xml 200 OK
+<?xml version="1.0" encoding="UTF-8"?>
+<Tagging>
+  <TagSet>
+    <Tag>
+      <Key>Project</Key>
+      <Value>Research</Value>
+    </Tag>
+    <Tag>
+      <Key>Status</Key>
+      <Value>Active</Value>
+    </Tag>
+  </TagSet>
+</Tagging>
+```
+
+---
+
+## PUT /{bucket}/{key}?tagging — PutObjectTagging
+
+Replaces the entire tag set for an object. Any existing tags are discarded. You can set up to 10 tags per object; each key and value must be a UTF-8 string.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket containing the object.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Object key to tag.
+</ParamField>
+
+### Request body fields
+
+<ResponseField name="Tagging.TagSet[].Tag.Key" type="string">
+  Tag key. Must be unique within the tag set.
+</ResponseField>
+
+<ResponseField name="Tagging.TagSet[].Tag.Value" type="string">
+  Tag value.
+</ResponseField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Tags updated successfully |
+| `404` | `NoSuchKey` — object does not exist |
+
+### Example
+
+```bash curl
+curl --request PUT \
+  --url 'https://gateway.fx.land/my-bucket/report.pdf?tagging' \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/xml' \
+  --data '<?xml version="1.0" encoding="UTF-8"?>
+<Tagging>
+  <TagSet>
+    <Tag>
+      <Key>Project</Key>
+      <Value>Research</Value>
+    </Tag>
+    <Tag>
+      <Key>Status</Key>
+      <Value>Active</Value>
+    </Tag>
+  </TagSet>
+</Tagging>'
+```
+
+---
+
+## DELETE /{bucket}/{key}?tagging — DeleteObjectTagging
+
+Removes all tags from an object. After this call, GetObjectTagging returns an empty `TagSet`.
+
+**Auth:** `storage:write` scope — `Authorization: Bearer <token>`
+
+### Parameters
+
+<ParamField path="bucket" type="string" required>
+  Bucket containing the object.
+</ParamField>
+
+<ParamField path="key" type="string" required>
+  Object key whose tags should be removed.
+</ParamField>
+
+### Response codes
+
+| Status | Meaning |
+|--------|---------|
+| `204` | All tags deleted |
+| `404` | `NoSuchKey` — object does not exist |
+
+### Example
+
+```bash curl
+curl --request DELETE \
+  --url 'https://gateway.fx.land/my-bucket/report.pdf?tagging' \
+  --header 'Authorization: Bearer <token>'
+```

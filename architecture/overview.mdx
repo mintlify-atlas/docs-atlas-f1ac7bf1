@@ -1,0 +1,85 @@
+---
+title: "How Fula Storage works: architecture overview"
+description: "Learn how the Fula gateway, fula-core, fula-blockstore, and fula-crypto layers work together to deliver S3-compatible decentralized storage."
+---
+
+Fula Storage is built as a stack of four discrete layers, each with a clearly bounded responsibility. An application speaks plain S3—using any existing AWS SDK, CLI, or tool—and the stack beneath it handles routing, indexing, block storage, and cryptography without exposing those details upward. This separation keeps each layer independently testable, upgradeable, and replaceable while preserving full S3 wire compatibility at the surface.
+
+## System diagram
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                         │
+│         (boto3, AWS SDK, curl, any S3 client)               │
+├─────────────────────────────────────────────────────────────┤
+│                     Fula Gateway                             │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │    Auth     │ Rate Limiter │   S3 API Handlers    │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+├─────────────────────────────────────────────────────────────┤
+│                      fula-core                               │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │Prolly Trees │    Buckets   │       CRDTs          │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+├─────────────────────────────────────────────────────────────┤
+│                   fula-blockstore                            │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │    IPFS     │ IPFS Cluster │      Chunking        │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+├─────────────────────────────────────────────────────────────┤
+│                    fula-crypto (Quantum-Safe)                │
+│    ┌─────────────┬──────────────┬──────────────────────┐    │
+│    │ Hybrid KEM  │   BLAKE3     │        Bao           │    │
+│    │ X25519+MLKEM│              │                      │    │
+│    └─────────────┴──────────────┴──────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Layer breakdown
+
+### Application layer
+
+Any tool that speaks the Amazon S3 API works against Fula without modification—`boto3`, the AWS CLI, the JavaScript AWS SDK, any S3-compatible framework. Requests arrive over HTTP(S) and are authenticated using AWS Signature V4 with a JWT token embedded in the access key.
+
+### Fula Gateway (`fula-cli`)
+
+The gateway is the sole public entry point. It validates JWT authentication, enforces per-user rate limits, and translates incoming S3 requests into calls to `fula-core`. It is trusted for routing but never holds or sees encryption keys. Per-user bucket namespacing happens here, so two users can own buckets with identical names without conflicts.
+
+### `fula-core`
+
+The storage engine that sits behind the gateway. It manages bucket metadata, maintains **Prolly Tree** indexes for O(log n) `ListObjectsV2` performance, and uses **CRDT** (conflict-free replicated data type) structures so metadata stays consistent across distributed nodes without coordination locks. All object-level business logic—copy, delete, multipart assembly—is implemented here.
+
+### `fula-blockstore`
+
+Responsible for persisting and retrieving raw content blocks. It speaks directly to an IPFS node and, optionally, an IPFS Cluster for replicated pinning. Large files are transparently split into chunks (files over 768 KB are split to stay under the IPFS 1 MB block limit), and a manifest object tracks the chunks. ETags returned to S3 clients are IPFS CIDs rather than MD5 hashes.
+
+### `fula-crypto`
+
+The cryptographic foundation for the entire stack. It provides hybrid key encapsulation using X25519 combined with ML-KEM-768 (NIST FIPS 203), AES-256-GCM / ChaCha20-Poly1305 for symmetric encryption, BLAKE3 for hashing, and Bao for verified streaming. All encryption happens client-side; ciphertext is what travels to `fula-blockstore` and beyond.
+
+## Crates
+
+| Crate | Description |
+|---|---|
+| `fula-crypto` | Quantum-safe cryptography: hybrid X25519 + ML-KEM-768 KEM, HPKE, BLAKE3, Bao |
+| `fula-blockstore` | IPFS block storage, IPFS Cluster pinning, and transparent chunking |
+| `fula-core` | Storage engine: Prolly Tree indexes, bucket management, CRDTs |
+| `fula-cli` | S3-compatible gateway server (auth, rate limiting, S3 API handlers) |
+| `fula-client` | Client SDK with optional client-side encryption and multipart support |
+
+## Explore further
+
+<CardGroup cols={2}>
+  <Card title="Security model" icon="shield" href="/architecture/security">
+    Zero-trust design, hybrid post-quantum cryptography, and what storage nodes can and cannot see.
+  </Card>
+  <Card title="IPFS storage" icon="database" href="/architecture/ipfs-storage">
+    Content addressing, Prolly Tree indexing, CRDT sync, and the full data lifecycle.
+  </Card>
+  <Card title="Encryption guide" icon="lock" href="/guides/encryption">
+    How to use the `EncryptedClient` SDK for client-side encryption with FlatNamespace mode.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/buckets">
+    Complete endpoint documentation with request and response examples.
+  </Card>
+</CardGroup>
